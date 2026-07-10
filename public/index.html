@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LeadNest</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Auth screen -->
+  <div id="auth-screen" class="hidden min-h-screen flex items-center justify-center p-5">
+    <div class="w-full max-w-[400px]">
+      <div class="flex items-center justify-center gap-2 mb-6">
+        <div class="brand-mark"><i data-lucide="home"></i></div>
+        <span class="text-[22px] font-extrabold tracking-tight">LeadNest</span>
+      </div>
+      <div class="panel p-7">
+        <h1 id="auth-title" class="text-[19px] font-bold mb-1">Welcome back</h1>
+        <p id="auth-sub" class="text-[13px] text-muted mb-5">Sign in to your realtor workspace.</p>
+        <div class="flex flex-col gap-3">
+          <div id="auth-name-wrap" class="hidden">
+            <label class="lbl">Full name</label>
+            <input id="auth-name" class="input mt-1" placeholder="Jordan Rivera" autocomplete="name" />
+          </div>
+          <div>
+            <label class="lbl">Email</label>
+            <input id="auth-email" type="email" class="input mt-1" placeholder="you@example.com" autocomplete="email" />
+          </div>
+          <div>
+            <label class="lbl">Password</label>
+            <input id="auth-pass" type="password" class="input mt-1" placeholder="••••••••" autocomplete="current-password" />
+          </div>
+          <div id="auth-msg" class="text-[12.5px] font-medium text-rose-500 min-h-[16px]"></div>
+          <button id="auth-submit" class="btn-primary w-full justify-center">Sign in</button>
+        </div>
+        <div class="text-[12.5px] text-muted mt-4 text-center">
+          <span id="auth-switch-text">New here?</span>
+          <a id="auth-switch" href="#" class="font-semibold text-[var(--accent)]">Create an account</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App -->
+  <div id="app-screen" class="hidden">
+    <div class="flex min-h-screen">
+      <aside class="sidebar">
+        <div class="flex items-center gap-2 px-4 h-16 border-b border-[var(--border)]">
+          <div class="brand-mark sm"><i data-lucide="home"></i></div>
+          <span class="text-[16px] font-extrabold tracking-tight">LeadNest</span>
+        </div>
+        <nav id="nav" class="p-3 flex flex-col gap-1"></nav>
+        <div class="mt-auto p-3 border-t border-[var(--border)]">
+          <div id="nav-user" class="flex items-center gap-2 px-2 py-2 rounded-lg"></div>
+        </div>
+      </aside>
+      <main class="flex-1 min-w-0">
+        <header class="topbar">
+          <button id="menu-btn" class="md:hidden icon-btn"><i data-lucide="menu"></i></button>
+          <div id="topbar-title" class="text-[15px] font-bold"></div>
+          <button id="logout-btn" class="ml-auto icon-btn" title="Sign out"><i data-lucide="log-out"></i></button>
+        </header>
+        <div id="view" class="p-5 md:p-7 max-w-[1100px] mx-auto"></div>
+      </main>
+    </div>
+    <div id="sidebar-scrim" class="hidden"></div>
+  </div>
+
+  <!-- Modal host -->
+  <div id="modal-root"></div>
+  <!-- Toast host -->
+  <div id="toast" class="hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
