@@ -56,6 +56,7 @@
     { id: 'contacts', label: 'Contacts',     icon: 'contact' },
     { id: 'calls',    label: 'Calls',        icon: 'phone' },
     { id: 'tasks',    label: 'Follow-ups',   icon: 'list-checks' },
+    { id: 'emails',   label: 'Auto Emails',  icon: 'mail' },
     { id: 'settings', label: 'Settings',     icon: 'settings' }
   ];
 
@@ -156,7 +157,7 @@
   function render() {
     const v = $('view');
     v.innerHTML = `<div class="empty"><i data-lucide="loader"></i></div>`; icons();
-    const fn = { home: renderHome, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, tasks: renderTasks, settings: renderSettings }[active];
+    const fn = { home: renderHome, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
     (fn || renderHome)();
   }
 
@@ -639,6 +640,126 @@
         await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify(body) });
         toast('Task added'); renderTasks();
       });
+  }
+
+  // ---------- Automatic Emails ----------
+  let emailData = null;
+  async function renderEmails() {
+    try { emailData = await api('/api/realtor/emails'); } catch (e) { return errView(e); }
+    const s = emailData.settings, wd = emailData.weekdays;
+    const notice = emailData.emailConfigured ? '' : `
+      <div class="panel p-3 mb-4" style="border-color:#E8C36A;background:var(--accent-weak)">
+        <div class="flex items-start gap-2 text-[12.5px]">
+          <i data-lucide="info" style="width:15px;height:15px;flex-shrink:0;margin-top:1px;color:var(--accent)"></i>
+          <div>You can build your list, schedule, and message now. To actually <b>send</b>, add SMTP settings on the server (see <span class="font-mono">.env.example</span>). Until then, sending is paused.</div>
+        </div>
+      </div>`;
+    const recips = emailData.recipients;
+    const recipRows = recips.length ? recips.map(r => `
+      <div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0">
+        <div class="avatar sm">${initials(r.name || r.email)}</div>
+        <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(r.name || r.email)}</div>
+          ${r.name ? `<div class="text-[11.5px] text-muted truncate">${esc(r.email)}</div>` : ''}</div>
+        <button class="act" data-rm="${r.id}" title="Remove"><i data-lucide="trash-2"></i></button>
+      </div>`).join('') : `<div class="text-[13px] text-muted py-6 text-center">No one on the list yet. Add your first contact above.</div>`;
+    const history = emailData.history.length ? `
+      <div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Recent sends</h3>
+      ${emailData.history.map(h => `<div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0">
+        <div class="stat-icon badge ${h.failed ? 'amber' : 'green'}" style="width:30px;height:30px;border-radius:8px"><i data-lucide="send" style="width:14px;height:14px"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[12.5px] font-medium truncate">${esc(h.subject)}</div>
+          <div class="text-[11.5px] text-muted">${h.sent}/${h.recipients} sent${h.failed ? ' · ' + h.failed + ' failed' : ''} · ${h.trigger}</div></div>
+        <div class="text-[11px] text-muted">${fmtWhen(h.at)}</div></div>`).join('')}</div>` : '';
+
+    $('view').innerHTML = `
+      ${pageHead('Automatic Emails', 'Build a list, write your message, and let it send every week.', '')}
+      ${notice}
+      <div class="grid-2">
+        <div class="panel p-4">
+          <h3 class="text-[14px] font-bold mb-1">Mailing list <span class="text-muted font-medium">(${recips.length})</span></h3>
+          <p class="text-[12px] text-muted mb-3">Everyone here gets the weekly email.</p>
+          <div class="flex gap-2 mb-1">
+            <input id="em-email" class="input" placeholder="name@email.com" style="flex:1">
+            <input id="em-name" class="input" placeholder="Name (optional)" style="width:120px">
+            <button class="btn-primary" id="em-add"><i data-lucide="plus"></i></button>
+          </div>
+          <div class="text-[11.5px] text-muted mb-3">Tip: paste several addresses separated by commas to add them all.</div>
+          ${recipRows}
+        </div>
+        <div class="panel p-4">
+          <div class="flex items-start justify-between gap-3 mb-3">
+            <div><h3 class="text-[14px] font-bold">Weekly schedule</h3><p class="text-[12px] text-muted">Send automatically once a week.</p></div>
+            <button id="em-toggle" role="switch" aria-checked="${s.enabled}" style="position:relative;width:44px;height:26px;border-radius:13px;border:none;cursor:pointer;flex-shrink:0;transition:background .15s;background:${s.enabled ? 'var(--accent)' : 'var(--border-strong)'}">
+              <span id="em-knob" style="position:absolute;top:3px;left:${s.enabled ? '21px' : '3px'};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .15s"></span></button>
+          </div>
+          <div class="field mb-3"><label class="lbl">Send every</label>
+            <select id="em-day" class="input mt-1">${wd.map((d, i) => `<option value="${i}" ${s.sendDay === i ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
+          <div class="text-[12px] text-muted mb-3">${s.lastRun ? 'Last sent ' + fmtDate(s.lastRun) + '.' : 'Not sent yet.'}</div>
+          <button class="btn-ghost w-full justify-center" id="em-send"><i data-lucide="send"></i>Send to everyone now</button>
+        </div>
+      </div>
+      <div class="panel p-5 mt-5" style="max-width:720px">
+        <h3 class="text-[14px] font-bold mb-1">The email</h3>
+        <p class="text-[12px] text-muted mb-3">This is what goes out each week. Edit it anytime.</p>
+        <div class="field mb-3"><label class="lbl">Subject</label><input id="em-subject" class="input mt-1" value="${escA(s.subject)}"></div>
+        <div class="field mb-3"><label class="lbl">Message</label><textarea id="em-body" class="input mt-1" style="min-height:180px">${esc(s.body)}</textarea></div>
+        <div class="flex items-center gap-3"><button class="btn-primary" id="em-save"><i data-lucide="check"></i>Save email</button><span id="em-msg" class="text-[12.5px] font-medium"></span></div>
+      </div>
+      ${history}`;
+    icons();
+
+    // Add recipient(s)
+    async function addRecip() {
+      const raw = $('em-email').value.trim(); const name = $('em-name').value.trim();
+      if (!raw) return;
+      const parts = raw.split(/[,\n;]+/).map(x => x.trim()).filter(Boolean);
+      try {
+        if (parts.length > 1) {
+          const res = await api('/api/realtor/emails/recipients/import', { method: 'POST', body: JSON.stringify({ emails: parts }) });
+          toast(`Added ${res.added}${res.skipped ? ', skipped ' + res.skipped : ''}`);
+        } else {
+          await api('/api/realtor/emails/recipients', { method: 'POST', body: JSON.stringify({ email: parts[0], name }) });
+          toast('Added to list');
+        }
+        renderEmails();
+      } catch (e) { toast(e.message, 'alert-triangle'); }
+    }
+    $('em-add').addEventListener('click', addRecip);
+    $('em-email').addEventListener('keydown', e => { if (e.key === 'Enter') addRecip(); });
+    $('em-name').addEventListener('keydown', e => { if (e.key === 'Enter') addRecip(); });
+    $('view').querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', async () => {
+      await api('/api/realtor/emails/recipients/' + b.dataset.rm, { method: 'DELETE' }); toast('Removed'); renderEmails();
+    }));
+
+    // Save settings helper (subject/body/enabled/sendDay)
+    async function saveSettings(patch, okMsg) {
+      const body = Object.assign({ subject: $('em-subject').value, body: $('em-body').value, enabled: s.enabled, sendDay: Number($('em-day').value) }, patch);
+      const res = await api('/api/realtor/emails/settings', { method: 'PUT', body: JSON.stringify(body) });
+      emailData.settings = res; Object.assign(s, res);
+      if (okMsg) toast(okMsg);
+      return res;
+    }
+    let on = s.enabled;
+    $('em-toggle').addEventListener('click', async () => {
+      on = !on;
+      $('em-toggle').style.background = on ? 'var(--accent)' : 'var(--border-strong)';
+      $('em-knob').style.left = on ? '21px' : '3px';
+      $('em-toggle').setAttribute('aria-checked', on);
+      try { await saveSettings({ enabled: on }, on ? 'Weekly sending on' : 'Weekly sending off'); }
+      catch (e) { toast(e.message, 'alert-triangle'); }
+    });
+    $('em-day').addEventListener('change', async () => { try { await saveSettings({ sendDay: Number($('em-day').value) }, 'Schedule updated'); } catch (e) { toast(e.message, 'alert-triangle'); } });
+    $('em-save').addEventListener('click', async () => {
+      const msg = $('em-msg'); msg.style.color = '#C23B3B';
+      try { await saveSettings({}); msg.style.color = '#1B7F4B'; msg.textContent = 'Saved.'; toast('Email saved'); }
+      catch (e) { msg.textContent = e.message; }
+    });
+    $('em-send').addEventListener('click', async () => {
+      if (!recips.length) return toast('Add someone to your list first.', 'info');
+      if (!confirm(`Send this email to all ${recips.length} recipient${recips.length === 1 ? '' : 's'} now?`)) return;
+      const btn = $('em-send'); btn.disabled = true;
+      try { const r = await api('/api/realtor/emails/send-now', { method: 'POST' }); toast(`Sent to ${r.sent} of ${r.recipients}`); renderEmails(); }
+      catch (e) { toast(e.message, 'alert-triangle'); btn.disabled = false; }
+    });
   }
 
   // ---------- Settings ----------

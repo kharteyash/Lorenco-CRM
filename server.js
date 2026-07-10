@@ -8,6 +8,7 @@ const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const path = require('path');
+const nodemailer = require('nodemailer');
 const { Pool } = require('pg');
 
 // Load environment variables from .env (DATABASE_URL, etc.).
@@ -200,6 +201,44 @@ const SCHEMA = `
     created_at TIMESTAMPTZ DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS realtor_lead_notes_lead ON realtor_lead_notes (lead_id, id);
+
+  -- Automatic emails: a mailing list of recipients per account.
+  CREATE TABLE IF NOT EXISTS email_recipients (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email      TEXT NOT NULL,
+    name       TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS email_recipients_owner ON email_recipients (user_id, id);
+  -- One address only once per account.
+  CREATE UNIQUE INDEX IF NOT EXISTS email_recipients_uniq ON email_recipients (user_id, lower(email));
+
+  -- The weekly-email settings for an account: the template (subject/body), whether
+  -- it's on, which weekday to send (0=Sun..6=Sat), and the last date it ran (guards
+  -- against double-sends). One row per user.
+  CREATE TABLE IF NOT EXISTS email_settings (
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    subject       TEXT,
+    body          TEXT,
+    enabled       BOOLEAN DEFAULT FALSE,
+    send_day      INTEGER DEFAULT 1,
+    last_run_date TEXT,
+    updated_at    TIMESTAMPTZ DEFAULT now()
+  );
+
+  -- A record of each weekly send, for the "recent sends" history.
+  CREATE TABLE IF NOT EXISTS email_sends (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subject     TEXT,
+    recipients  INTEGER DEFAULT 0,
+    sent        INTEGER DEFAULT 0,
+    failed      INTEGER DEFAULT 0,
+    trigger     TEXT,           -- 'weekly' | 'manual'
+    created_at  TIMESTAMPTZ DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS email_sends_owner ON email_sends (user_id, id);
 `;
 
 // Periodically clear expired sessions.
@@ -964,6 +1003,199 @@ app.get('/api/realtor/home', safe(async (req, res) => {
     activity: activity.slice(0, 15)
   });
 }));
+
+// ===================================================================
+// Automatic emails (weekly mailing list)
+// ===================================================================
+// Sending goes through SMTP if it's configured in the environment. Without it,
+// the list/schedule/template are still saved and editable; sends just report
+// "email isn't set up" instead of silently doing nothing.
+//   SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, SMTP_FROM
+// For a weekly cron that works even when a free host is asleep, hit:
+//   GET /api/cron/dispatch?key=CRON_SECRET   (e.g. from cron-job.org)
+function emailConfigured() {
+  return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+let _transport;
+function mailer() {
+  if (!emailConfigured()) return null;
+  if (!_transport) {
+    const port = Number(process.env.SMTP_PORT) || 587;
+    _transport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST, port, secure: port === 465,
+      auth: { user: process.env.SMTP_USER, pass: String(process.env.SMTP_PASS).replace(/\s+/g, '') }
+    });
+  }
+  return _transport;
+}
+const mailFrom = () => process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@localhost';
+
+const DEFAULT_SUBJECT = 'A quick note from your agent';
+const DEFAULT_BODY = `Hi there,
+
+Just checking in with this week's update. If you're thinking about buying or
+selling — or know someone who is — I'd love to help.
+
+Reply anytime; I'm always happy to talk.
+
+Best,
+Your agent`;
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+async function loadEmailSettings(userId) {
+  let s = await one('SELECT * FROM email_settings WHERE user_id = $1', [userId]);
+  if (!s) {
+    s = await one(`INSERT INTO email_settings (user_id, subject, body, enabled, send_day)
+                   VALUES ($1, $2, $3, FALSE, 1) RETURNING *`, [userId, DEFAULT_SUBJECT, DEFAULT_BODY]);
+  }
+  return s;
+}
+function emailSettingsJson(s) {
+  return {
+    subject: s.subject || DEFAULT_SUBJECT, body: s.body || DEFAULT_BODY,
+    enabled: s.enabled === true, sendDay: Number.isInteger(s.send_day) ? s.send_day : 1,
+    lastRun: s.last_run_date || null
+  };
+}
+const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || '').trim());
+
+// Send one account's list now. Returns { sent, failed, recipients, error? }.
+async function sendWeeklyFor(userId, trigger) {
+  const s = await loadEmailSettings(userId);
+  const recips = await q('SELECT email, name FROM email_recipients WHERE user_id = $1', [userId]);
+  if (!recips.length) return { sent: 0, failed: 0, recipients: 0, error: 'No recipients on your list yet.' };
+  const tx = mailer();
+  if (!tx) return { sent: 0, failed: 0, recipients: recips.length, error: 'Email sending isn’t set up (SMTP not configured).' };
+  const subject = s.subject || DEFAULT_SUBJECT;
+  const body = s.body || DEFAULT_BODY;
+  let sent = 0, failed = 0;
+  for (const r of recips) {
+    try {
+      await tx.sendMail({
+        from: mailFrom(), to: r.email, subject,
+        text: body, html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`
+      });
+      sent++;
+    } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
+  }
+  await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger)
+                    VALUES ($1,$2,$3,$4,$5,$6)`, [userId, subject, recips.length, sent, failed, trigger || 'manual']);
+  return { sent, failed, recipients: recips.length };
+}
+
+app.get('/api/realtor/emails', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const recipients = await q('SELECT id, email, name FROM email_recipients WHERE user_id = $1 ORDER BY lower(email)', [req.user.id]);
+  const settings = emailSettingsJson(await loadEmailSettings(req.user.id));
+  const history = await q('SELECT subject, recipients, sent, failed, trigger, created_at FROM email_sends WHERE user_id = $1 ORDER BY id DESC LIMIT 10', [req.user.id]);
+  res.json({
+    recipients: recipients.map(r => ({ id: r.id, email: r.email, name: r.name || '' })),
+    settings,
+    weekdays: WEEKDAYS,
+    emailConfigured: emailConfigured(),
+    history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, at: h.created_at }))
+  });
+}));
+
+app.post('/api/realtor/emails/recipients', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const email = String((req.body || {}).email || '').trim().toLowerCase().slice(0, 160);
+  const name = String((req.body || {}).name || '').trim().slice(0, 120);
+  if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  const dup = await one('SELECT id FROM email_recipients WHERE user_id = $1 AND lower(email) = $2', [req.user.id, email]);
+  if (dup) return res.status(409).json({ error: 'That address is already on your list.' });
+  const row = await one('INSERT INTO email_recipients (user_id, email, name) VALUES ($1,$2,$3) RETURNING id, email, name',
+    [req.user.id, email, name]);
+  res.json({ id: row.id, email: row.email, name: row.name || '' });
+}));
+
+// Bulk add (comma / newline separated addresses, pre-split client-side).
+app.post('/api/realtor/emails/recipients/import', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const list = (req.body || {}).emails;
+  if (!Array.isArray(list) || !list.length) return res.status(400).json({ error: 'No addresses to add.' });
+  if (list.length > 2000) return res.status(400).json({ error: 'Too many at once (max 2000).' });
+  let added = 0, skipped = 0;
+  for (const raw of list) {
+    const email = String(raw || '').trim().toLowerCase().slice(0, 160);
+    if (!validEmail(email)) { skipped++; continue; }
+    try {
+      const r = await pool.query('INSERT INTO email_recipients (user_id, email) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.user.id, email]);
+      if (r.rowCount) added++; else skipped++;
+    } catch (e) { skipped++; }
+  }
+  res.json({ ok: true, added, skipped });
+}));
+
+app.delete('/api/realtor/emails/recipients/:id', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const r = await pool.query('DELETE FROM email_recipients WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'Recipient not found.' });
+  res.json({ ok: true });
+}));
+
+app.put('/api/realtor/emails/settings', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  await loadEmailSettings(req.user.id); // ensure the row exists
+  const b = req.body || {};
+  const cur = await one('SELECT * FROM email_settings WHERE user_id = $1', [req.user.id]);
+  const subject = b.subject != null ? String(b.subject).trim().slice(0, 200) : cur.subject;
+  const body = b.body != null ? String(b.body).slice(0, 10000) : cur.body;
+  const enabled = b.enabled != null ? !!b.enabled : cur.enabled;
+  let sendDay = cur.send_day;
+  if (b.sendDay != null) { const d = Number(b.sendDay); if (Number.isInteger(d) && d >= 0 && d <= 6) sendDay = d; }
+  if (!String(subject || '').trim()) return res.status(400).json({ error: 'A subject is required.' });
+  const row = await one(`UPDATE email_settings SET subject=$1, body=$2, enabled=$3, send_day=$4, updated_at=now()
+                         WHERE user_id=$5 RETURNING *`, [subject, body, enabled, sendDay, req.user.id]);
+  res.json(emailSettingsJson(row));
+}));
+
+// Send to the whole list right now (manual test / one-off blast).
+app.post('/api/realtor/emails/send-now', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const r = await sendWeeklyFor(req.user.id, 'manual');
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+}));
+
+// Weekly dispatcher: send for every enabled account whose configured weekday is
+// today and that hasn't already run today. Called by the internal timer and by
+// the external cron endpoint. Idempotent via last_run_date.
+async function dispatchWeeklyEmails() {
+  if (!emailConfigured()) return { ran: 0 };
+  const rows = await q(`SELECT s.user_id, s.send_day, s.last_run_date, u.tz
+                        FROM email_settings s JOIN users u ON u.id = s.user_id
+                        WHERE s.enabled = TRUE`);
+  let ran = 0;
+  for (const s of rows) {
+    const today = (s.tz ? todayInTz(s.tz) : serverToday());
+    const weekday = new Date(today + 'T00:00:00').getDay();
+    if (weekday !== s.send_day) continue;
+    if (s.last_run_date === today) continue; // already sent today
+    // Claim the day first so overlapping runs can't double-send.
+    const claim = await pool.query(
+      `UPDATE email_settings SET last_run_date = $1 WHERE user_id = $2 AND (last_run_date IS DISTINCT FROM $1)`,
+      [today, s.user_id]);
+    if (claim.rowCount === 0) continue;
+    try { await sendWeeklyFor(s.user_id, 'weekly'); ran++; }
+    catch (e) { console.error('weekly dispatch for user', s.user_id, e.message); }
+  }
+  return { ran };
+}
+
+// External cron trigger (protect with CRON_SECRET). Safe to call every few minutes.
+app.get('/api/cron/dispatch', safe(async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || req.query.key !== secret) return res.status(403).json({ error: 'Forbidden.' });
+  const r = await dispatchWeeklyEmails();
+  res.json({ ok: true, ...r });
+}));
+
+// Internal timer: also runs hourly while the process is awake (belt-and-braces
+// alongside the external cron, which is what matters on hosts that sleep).
+setInterval(() => { dispatchWeeklyEmails().catch(e => console.error('weekly timer:', e.message)); }, 60 * 60 * 1000).unref();
 
 // ===================================================================
 // Static files + start
