@@ -125,6 +125,25 @@
   $('sidebar-scrim').addEventListener('click', closeSidebar);
   $('logout-btn').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }).catch(() => {}); location.hash = ''; me = null; showAuth(); });
 
+  // ---------- Theme (light / dark) ----------
+  // Applied to <html> so it covers the auth screen too. Persisted per browser;
+  // defaults to the OS preference until the user picks one.
+  function applyTheme(mode) {
+    document.documentElement.setAttribute('data-theme', mode);
+    const btn = $('theme-btn');
+    if (btn) { btn.innerHTML = `<i data-lucide="${mode === 'dark' ? 'sun' : 'moon'}"></i>`; btn.title = mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'; icons(); }
+  }
+  function currentTheme() {
+    return localStorage.getItem('ln-theme')
+      || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  }
+  applyTheme(currentTheme());
+  $('theme-btn').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('ln-theme', next);
+    applyTheme(next);
+  });
+
   window.addEventListener('hashchange', route);
   function route() {
     const id = (location.hash || '#home').slice(1);

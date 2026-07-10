@@ -10,6 +10,34 @@
   --accent: #4F46E5;
   --accent-weak: #EEF0FE;
 }
+/* Dark palette. JS stamps data-theme on <html>; the media query is a pre-JS
+   fallback so there's no flash before the script runs. */
+:root[data-theme="dark"] {
+  --bg: #0D0E17;
+  --surface: #161826;
+  --surface-2: #1E2032;
+  --surface-3: #282B41;
+  --border: #252838;
+  --border-strong: #343850;
+  --text: #EDEEF6;
+  --muted: #9DA0B8;
+  --accent: #7C74FF;
+  --accent-weak: #20223A;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0D0E17;
+    --surface: #161826;
+    --surface-2: #1E2032;
+    --surface-3: #282B41;
+    --border: #252838;
+    --border-strong: #343850;
+    --text: #EDEEF6;
+    --muted: #9DA0B8;
+    --accent: #7C74FF;
+    --accent-weak: #20223A;
+  }
+}
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -129,6 +157,11 @@ textarea.input { resize: vertical; min-height: 72px; }
 .badge.gray  { background: var(--surface-3); color: var(--muted); }
 .badge.red   { background: #FDE7E7; color: #C23B3B; }
 .badge.purple{ background: #F0E9FE; color: #6B34C7; }
+:root[data-theme="dark"] .badge.green { background: #12301F; color: #5FD996; }
+:root[data-theme="dark"] .badge.blue  { background: #16233F; color: #8FB0FF; }
+:root[data-theme="dark"] .badge.amber { background: #33260C; color: #E6B85A; }
+:root[data-theme="dark"] .badge.red   { background: #341717; color: #F08A8A; }
+:root[data-theme="dark"] .badge.purple{ background: #241638; color: #C4A2FF; }
 
 .avatar {
   width: 34px; height: 34px; border-radius: 50%;
@@ -180,7 +213,11 @@ textarea.input { resize: vertical; min-height: 72px; }
   padding: 11px 18px; border-radius: 10px; z-index: 90;
   box-shadow: 0 8px 24px rgba(0,0,0,.25); display: flex; align-items: center; gap: 8px;
 }
+/* The ID selector above out-specifies Tailwind's .hidden, so pin the hidden
+   state to the same specificity or the empty toast shows as a stray dot. */
+#toast.hidden { display: none; }
 #toast i { width: 16px; height: 16px; }
+:root[data-theme="dark"] #toast { background: #2A2D45; }
 
 .empty { text-align: center; padding: 48px 20px; }
 .empty i { width: 30px; height: 30px; color: var(--border-strong); }
