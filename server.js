@@ -26,6 +26,39 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const SESSION_COOKIE = 'ln_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+// ----- Google OAuth (for "send as my Gmail") -----
+const GOOGLE = {
+  clientId: process.env.GOOGLE_CLIENT_ID || '',
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+  redirectUri: process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/api/google/callback`,
+  scopes: ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.send']
+};
+const googleConfigured = () => !!(GOOGLE.clientId && GOOGLE.clientSecret);
+const oauthStates = new Map(); // state -> { userId, exp }  (CSRF + user mapping)
+
+// Optional encryption at rest for OAuth tokens. Set TOKEN_ENC_KEY (any strong
+// passphrase) to turn it on; without it tokens are stored as-is. Reads handle
+// both encrypted ("enc:v1:…") and legacy plaintext transparently.
+const TOKEN_KEY = process.env.TOKEN_ENC_KEY
+  ? crypto.createHash('sha256').update(String(process.env.TOKEN_ENC_KEY)).digest() : null;
+function encToken(plain) {
+  if (plain == null || !TOKEN_KEY) return plain;
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', TOKEN_KEY, iv);
+  const enc = Buffer.concat([c.update(String(plain), 'utf8'), c.final()]);
+  return 'enc:v1:' + Buffer.concat([iv, c.getAuthTag(), enc]).toString('base64');
+}
+function decToken(stored) {
+  if (typeof stored !== 'string' || !stored.startsWith('enc:v1:')) return stored;
+  if (!TOKEN_KEY) { console.error('TOKEN_ENC_KEY missing but an encrypted token was found.'); return null; }
+  try {
+    const raw = Buffer.from(stored.slice(7), 'base64');
+    const d = crypto.createDecipheriv('aes-256-gcm', TOKEN_KEY, raw.subarray(0, 12));
+    d.setAuthTag(raw.subarray(12, 28));
+    return Buffer.concat([d.update(raw.subarray(28)), d.final()]).toString('utf8');
+  } catch (e) { console.error('Token decrypt failed:', e.message); return null; }
+}
+
 // ----- Database -----
 const isLocalDb = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
 // TLS to the database is verified by default (closes a man-in-the-middle gap).
@@ -225,6 +258,16 @@ const SCHEMA = `
     send_day      INTEGER DEFAULT 1,
     last_run_date TEXT,
     updated_at    TIMESTAMPTZ DEFAULT now()
+  );
+
+  -- Per-user connected Google account (for sending weekly email as themselves
+  -- via the Gmail API). Tokens may be stored encrypted (see TOKEN_ENC_KEY).
+  CREATE TABLE IF NOT EXISTS google_accounts (
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email         TEXT,
+    access_token  TEXT,
+    refresh_token TEXT,
+    expires_at    BIGINT
   );
 
   -- A record of each weekly send, for the "recent sends" history.
@@ -1005,6 +1048,102 @@ app.get('/api/realtor/home', safe(async (req, res) => {
 }));
 
 // ===================================================================
+// Google OAuth + Gmail send ("send as my Gmail")
+// ===================================================================
+async function saveGoogleTokens(userId, email, accessToken, refreshToken, expiresAt) {
+  await q(`
+    INSERT INTO google_accounts (user_id, email, access_token, refresh_token, expires_at)
+    VALUES ($1,$2,$3,$4,$5)
+    ON CONFLICT (user_id) DO UPDATE SET
+      email = EXCLUDED.email,
+      access_token = EXCLUDED.access_token,
+      refresh_token = COALESCE(EXCLUDED.refresh_token, google_accounts.refresh_token),
+      expires_at = EXCLUDED.expires_at
+  `, [userId, email, encToken(accessToken), refreshToken ? encToken(refreshToken) : null, expiresAt]);
+}
+// Valid access token for the user, refreshing if needed. null if not connected.
+async function getGoogleToken(userId) {
+  const row = await one('SELECT * FROM google_accounts WHERE user_id = $1', [userId]);
+  if (!row) return null;
+  const accessToken = decToken(row.access_token);
+  const refreshToken = decToken(row.refresh_token);
+  const exp = Number(row.expires_at);
+  if (exp && exp > Date.now() + 60000) return accessToken;
+  if (!refreshToken) return exp ? null : accessToken;
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: GOOGLE.clientId, client_secret: GOOGLE.clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' })
+  });
+  const tok = await r.json();
+  if (!r.ok) { console.error('Google token refresh failed:', tok); return null; }
+  const expiresAt = Date.now() + (tok.expires_in || 3600) * 1000;
+  await q('UPDATE google_accounts SET access_token = $1, expires_at = $2 WHERE user_id = $3', [encToken(tok.access_token), expiresAt, userId]);
+  return tok.access_token;
+}
+async function googleStatus(userId) {
+  const row = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
+  return { connected: !!row, email: row ? (row.email || '') : '', configured: googleConfigured() };
+}
+// Send one message through the user's Gmail. Throws on failure.
+async function sendViaGmail(userId, from, to, subject, body) {
+  const token = await getGoogleToken(userId);
+  if (!token) throw new Error('Your Google connection expired — reconnect Gmail.');
+  const headers = [
+    `From: ${from}`, `To: ${to}`,
+    `Subject: ${subject}`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"', '', body
+  ].join('\r\n');
+  const raw = Buffer.from(headers).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw })
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e.error && e.error.message) || 'Gmail rejected the message.'); }
+}
+
+// Start the OAuth flow — redirect the user to Google's consent screen.
+app.get('/api/google/connect', safe(async (req, res) => {
+  if (!req.user) return res.status(401).send('Sign in first.');
+  if (!googleConfigured()) return res.status(400).send('Google sign-in is not configured on this server.');
+  const state = crypto.randomBytes(16).toString('hex');
+  oauthStates.set(state, { userId: req.user.id, exp: Date.now() + 10 * 60 * 1000 });
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
+    client_id: GOOGLE.clientId, redirect_uri: GOOGLE.redirectUri, response_type: 'code',
+    scope: GOOGLE.scopes.join(' '), access_type: 'offline', prompt: 'consent',
+    include_granted_scopes: 'true', state
+  });
+  res.redirect(url);
+}));
+
+// OAuth callback — exchange the code, store tokens, bounce back to the app.
+app.get('/api/google/callback', safe(async (req, res) => {
+  const { code, state } = req.query;
+  const st = state && oauthStates.get(state);
+  oauthStates.delete(state);
+  if (!code || !st || st.exp < Date.now()) return res.redirect('/#emails');
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ code, client_id: GOOGLE.clientId, client_secret: GOOGLE.clientSecret, redirect_uri: GOOGLE.redirectUri, grant_type: 'authorization_code' })
+  });
+  const tok = await r.json();
+  if (!r.ok) { console.error('Google token exchange failed:', tok); return res.redirect('/?gmail=error#emails'); }
+  const expiresAt = Date.now() + (tok.expires_in || 3600) * 1000;
+  // Get the connected address.
+  let email = '';
+  try {
+    const ui = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (ui.ok) email = (await ui.json()).email || '';
+  } catch (e) { /* non-fatal */ }
+  await saveGoogleTokens(st.userId, email, tok.access_token, tok.refresh_token, expiresAt);
+  res.redirect('/?gmail=connected#emails');
+}));
+
+app.post('/api/google/disconnect', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  await pool.query('DELETE FROM google_accounts WHERE user_id = $1', [req.user.id]);
+  res.json({ ok: true });
+}));
+
+// ===================================================================
 // Automatic emails (weekly mailing list)
 // ===================================================================
 // Sending goes through SMTP if it's configured in the environment. Without it,
@@ -1059,28 +1198,39 @@ function emailSettingsJson(s) {
 }
 const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || '').trim());
 
-// Send one account's list now. Returns { sent, failed, recipients, error? }.
+// Send one account's list now. Prefers the user's connected Gmail (sends as
+// them); falls back to shared SMTP. Returns { sent, failed, recipients, via, error? }.
 async function sendWeeklyFor(userId, trigger) {
   const s = await loadEmailSettings(userId);
   const recips = await q('SELECT email, name FROM email_recipients WHERE user_id = $1', [userId]);
   if (!recips.length) return { sent: 0, failed: 0, recipients: 0, error: 'No recipients on your list yet.' };
-  const tx = mailer();
-  if (!tx) return { sent: 0, failed: 0, recipients: recips.length, error: 'Email sending isn’t set up (SMTP not configured).' };
+
   const subject = s.subject || DEFAULT_SUBJECT;
   const body = s.body || DEFAULT_BODY;
+
+  // Pick a channel: connected Gmail first, else SMTP.
+  const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
+  const tx = mailer();
+  let via = null, gmailFrom = '';
+  if (gmail) {
+    const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
+    gmailFrom = u && u.name ? `${u.name} <${gmail.email}>` : gmail.email;
+    via = 'gmail';
+  } else if (tx) { via = 'smtp'; }
+  else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
+
   let sent = 0, failed = 0;
   for (const r of recips) {
     try {
-      await tx.sendMail({
-        from: mailFrom(), to: r.email, subject,
-        text: body, html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`
-      });
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subject, body);
+      else await tx.sendMail({ from: mailFrom(), to: r.email, subject, text: body,
+        html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
       sent++;
     } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
   }
   await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger)
                     VALUES ($1,$2,$3,$4,$5,$6)`, [userId, subject, recips.length, sent, failed, trigger || 'manual']);
-  return { sent, failed, recipients: recips.length };
+  return { sent, failed, recipients: recips.length, via };
 }
 
 app.get('/api/realtor/emails', safe(async (req, res) => {
@@ -1088,11 +1238,14 @@ app.get('/api/realtor/emails', safe(async (req, res) => {
   const recipients = await q('SELECT id, email, name FROM email_recipients WHERE user_id = $1 ORDER BY lower(email)', [req.user.id]);
   const settings = emailSettingsJson(await loadEmailSettings(req.user.id));
   const history = await q('SELECT subject, recipients, sent, failed, trigger, created_at FROM email_sends WHERE user_id = $1 ORDER BY id DESC LIMIT 10', [req.user.id]);
+  const gmail = await googleStatus(req.user.id);
   res.json({
     recipients: recipients.map(r => ({ id: r.id, email: r.email, name: r.name || '' })),
     settings,
     weekdays: WEEKDAYS,
-    emailConfigured: emailConfigured(),
+    gmail,
+    // Sending works if Gmail is connected OR SMTP is set up.
+    canSend: gmail.connected || emailConfigured(),
     history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, at: h.created_at }))
   });
 }));
@@ -1164,12 +1317,18 @@ app.post('/api/realtor/emails/send-now', safe(async (req, res) => {
 // today and that hasn't already run today. Called by the internal timer and by
 // the external cron endpoint. Idempotent via last_run_date.
 async function dispatchWeeklyEmails() {
-  if (!emailConfigured()) return { ran: 0 };
-  const rows = await q(`SELECT s.user_id, s.send_day, s.last_run_date, u.tz
-                        FROM email_settings s JOIN users u ON u.id = s.user_id
+  // Include whether each user has a Gmail connected; a user can send if that's
+  // true or shared SMTP is configured. If neither path exists at all, bail early.
+  const smtp = emailConfigured();
+  const rows = await q(`SELECT s.user_id, s.send_day, s.last_run_date, u.tz,
+                          (g.user_id IS NOT NULL) AS has_gmail
+                        FROM email_settings s
+                        JOIN users u ON u.id = s.user_id
+                        LEFT JOIN google_accounts g ON g.user_id = s.user_id
                         WHERE s.enabled = TRUE`);
   let ran = 0;
   for (const s of rows) {
+    if (!smtp && !s.has_gmail) continue; // no way to send for this user
     const today = (s.tz ? todayInTz(s.tz) : serverToday());
     const weekday = new Date(today + 'T00:00:00').getDay();
     if (weekday !== s.send_day) continue;

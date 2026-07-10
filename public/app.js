@@ -646,12 +646,40 @@
   let emailData = null;
   async function renderEmails() {
     try { emailData = await api('/api/realtor/emails'); } catch (e) { return errView(e); }
-    const s = emailData.settings, wd = emailData.weekdays;
-    const notice = emailData.emailConfigured ? '' : `
+    // One-time toast after returning from the Google consent screen.
+    const gp = new URLSearchParams(location.search).get('gmail');
+    if (gp) { toast(gp === 'connected' ? 'Gmail connected' : 'Couldn\'t connect Gmail', gp === 'connected' ? 'check-circle-2' : 'alert-triangle'); history.replaceState(null, '', location.pathname + location.hash); }
+
+    const s = emailData.settings, wd = emailData.weekdays, gmail = emailData.gmail;
+
+    // Gmail connection card — top of the section.
+    const gmailCard = gmail.connected ? `
+      <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap">
+        <div class="stat-icon badge green" style="border-radius:11px"><i data-lucide="mail-check"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Gmail connected</div>
+          <div class="text-[12px] text-muted truncate">Weekly emails send from ${esc(gmail.email || 'your Google account')}.</div></div>
+        <button class="btn-ghost" id="gm-disconnect"><i data-lucide="unlink"></i>Disconnect</button>
+      </div>`
+      : gmail.configured ? `
+      <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap">
+        <div class="stat-icon badge gray" style="border-radius:11px"><i data-lucide="mail"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Send from your Gmail</div>
+          <div class="text-[12px] text-muted">Connect your Google account so weekly emails go out as you.</div></div>
+        <a class="btn-primary" href="/api/google/connect"><i data-lucide="mail"></i>Connect Gmail</a>
+      </div>`
+      : `
+      <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap">
+        <div class="stat-icon badge gray" style="border-radius:11px"><i data-lucide="mail"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Connect Gmail</div>
+          <div class="text-[12px] text-muted">Add <span class="font-mono">GOOGLE_CLIENT_ID</span> / <span class="font-mono">GOOGLE_CLIENT_SECRET</span> on the server to enable this (see <span class="font-mono">.env.example</span>).</div></div>
+        <button class="btn-ghost" disabled style="opacity:.55;cursor:not-allowed"><i data-lucide="mail"></i>Connect Gmail</button>
+      </div>`;
+
+    const notice = emailData.canSend ? '' : `
       <div class="panel p-3 mb-4" style="border-color:#E8C36A;background:var(--accent-weak)">
         <div class="flex items-start gap-2 text-[12.5px]">
           <i data-lucide="info" style="width:15px;height:15px;flex-shrink:0;margin-top:1px;color:var(--accent)"></i>
-          <div>You can build your list, schedule, and message now. To actually <b>send</b>, add SMTP settings on the server (see <span class="font-mono">.env.example</span>). Until then, sending is paused.</div>
+          <div>You can build your list, schedule, and message now. To actually <b>send</b>, connect Gmail above (or configure SMTP). Until then, sending is paused.</div>
         </div>
       </div>`;
     const recips = emailData.recipients;
@@ -672,6 +700,7 @@
 
     $('view').innerHTML = `
       ${pageHead('Automatic Emails', 'Build a list, write your message, and let it send every week.', '')}
+      ${gmailCard}
       ${notice}
       <div class="grid-2">
         <div class="panel p-4">
@@ -706,6 +735,14 @@
       </div>
       ${history}`;
     icons();
+
+    // Disconnect Gmail
+    const disc = $('gm-disconnect');
+    if (disc) disc.addEventListener('click', async () => {
+      if (!confirm('Disconnect your Gmail? Weekly emails will stop sending until you reconnect (or configure SMTP).')) return;
+      try { await api('/api/google/disconnect', { method: 'POST' }); toast('Gmail disconnected'); renderEmails(); }
+      catch (e) { toast(e.message, 'alert-triangle'); }
+    });
 
     // Add recipient(s)
     async function addRecip() {
