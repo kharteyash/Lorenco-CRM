@@ -1,0 +1,19 @@
+# Render Blueprint for LeadNest.
+# In Render: New -> Blueprint -> pick this repo. Render reads this file, then
+# prompts you for the values marked `sync: false` (your Neon DATABASE_URL).
+services:
+  - type: web
+    name: leadnest
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      # Paste your Neon POOLED connection string when Render prompts (the host
+      # has "-pooler" in it, and it should end with ?sslmode=require).
+      - key: DATABASE_URL
+        sync: false
+      # Enables secure cookies (the app trusts Render's proxy).
+      - key: NODE_ENV
+        value: production
