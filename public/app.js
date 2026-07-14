@@ -51,6 +51,7 @@
 
   const SECTIONS = [
     { id: 'home',     label: 'Home',         icon: 'layout-dashboard' },
+    { id: 'pipeline', label: 'Pipeline',     icon: 'kanban-square' },
     { id: 'leads',    label: 'Leads',        icon: 'user-plus' },
     { id: 'clients',  label: 'Past Clients', icon: 'user-check' },
     { id: 'contacts', label: 'Contacts',     icon: 'contact' },
@@ -65,6 +66,8 @@
   const FINANCING = ['Pre-approved', 'Needs a lender', 'Paying cash', 'Not sure'];
   const CREDIT = ['741+', '681-740', '621-680', '581-620', '<580'];
   const DEALS = ['Bought', 'Sold', 'Both'];
+  const STAGES = ['New', 'Contacted', 'Showing', 'Offer', 'Under Contract'];
+  const stageTone = (st) => ({ 'New': 'gray', 'Contacted': 'blue', 'Showing': 'purple', 'Offer': 'amber', 'Under Contract': 'green' }[st] || 'gray');
 
   let me = null;
   let active = 'home';
@@ -157,7 +160,7 @@
   function render() {
     const v = $('view');
     v.innerHTML = `<div class="empty"><i data-lucide="loader"></i></div>`; icons();
-    const fn = { home: renderHome, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
+    const fn = { home: renderHome, pipeline: renderPipeline, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
     (fn || renderHome)();
   }
 
@@ -235,6 +238,70 @@
   }
   function errView(e) { $('view').innerHTML = `<div class="panel p-8">${emptyState('alert-triangle', 'Something went wrong', e.message)}</div>`; icons(); }
 
+  // ---------- Pipeline (kanban) ----------
+  async function renderPipeline() {
+    try { leadCache = await api('/api/realtor/leads'); } catch (e) { return errView(e); }
+    const byStage = {}; STAGES.forEach(s => byStage[s] = []);
+    leadCache.forEach(l => { (byStage[l.stage] || byStage['New']).push(l); });
+
+    const card = (l) => {
+      const r = clientScore(l);
+      return `<div class="pipe-card" draggable="true" data-card="${l.id}">
+        <div class="flex items-start justify-between gap-2">
+          <div class="font-semibold text-[13px] leading-tight">${esc(l.name)}</div>
+          <span class="badge ${priBadge(r.priority)}" style="flex-shrink:0">${r.priority}</span>
+        </div>
+        <div class="text-[11.5px] text-muted mt-1 truncate">${esc([l.timeline, l.area].filter(Boolean).join(' · ')) || 'No details yet'}</div>
+        <div class="flex items-center gap-1.5 mt-2">
+          ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call" data-stop><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text" data-stop><i data-lucide="message-square"></i></a>` : ''}
+          ${l.email ? `<a class="act" href="${mailLink(l.email)}" title="Email" data-stop><i data-lucide="mail"></i></a>` : ''}
+          ${l.budget ? `<span class="text-[11px] text-muted ml-auto">${esc(l.budget)}</span>` : ''}
+        </div>
+      </div>`;
+    };
+    const columns = STAGES.map(st => `
+      <div class="pipe-col" data-col="${st}">
+        <div class="pipe-col-head">
+          <span class="badge ${stageTone(st)}">${st}</span>
+          <span class="text-[12px] text-muted num">${byStage[st].length}</span>
+        </div>
+        <div class="pipe-col-body" data-drop="${st}">
+          ${byStage[st].map(card).join('') || `<div class="pipe-empty">Drop leads here</div>`}
+        </div>
+      </div>`).join('');
+
+    $('view').innerHTML = `
+      ${pageHead('Pipeline', 'Drag a lead across stages as the deal moves. Click a card to open it.', `<button class="btn-primary" id="pipe-add"><i data-lucide="plus"></i>Add lead</button>`)}
+      <div class="pipe-board">${columns}</div>`;
+    icons();
+    $('pipe-add').addEventListener('click', () => leadModal(null));
+
+    // Open the lead on click (but not when using a quick action).
+    $('view').querySelectorAll('[data-card]').forEach(c => {
+      c.addEventListener('click', (e) => { if (e.target.closest('[data-stop]')) return; leadDrawer(+c.dataset.card); });
+      c.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', c.dataset.card); e.dataTransfer.effectAllowed = 'move'; c.classList.add('dragging'); });
+      c.addEventListener('dragend', () => c.classList.remove('dragging'));
+    });
+    $('view').querySelectorAll('[data-stop]').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+
+    // Drop zones.
+    $('view').querySelectorAll('[data-drop]').forEach(zone => {
+      zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drop-hover'); });
+      zone.addEventListener('dragleave', () => zone.classList.remove('drop-hover'));
+      zone.addEventListener('drop', async (e) => {
+        e.preventDefault(); zone.classList.remove('drop-hover');
+        const id = Number(e.dataTransfer.getData('text/plain'));
+        const stage = zone.dataset.drop;
+        const lead = leadCache.find(l => l.id === id);
+        if (!lead || lead.stage === stage) return;
+        const prev = lead.stage; lead.stage = stage;
+        renderPipeline(); // optimistic
+        try { await api('/api/realtor/leads/' + id + '/stage', { method: 'PATCH', body: JSON.stringify({ stage }) }); toast(`Moved to ${stage}`); }
+        catch (err) { lead.stage = prev; toast(err.message, 'alert-triangle'); renderPipeline(); }
+      });
+    });
+  }
+
   // ---------- Leads ----------
   let leadCache = [];
   let leadQuery = '';
@@ -310,6 +377,8 @@
         <div class="field"><label class="lbl">Name *</label><input class="input" data-f="name" value="${escA(l.name)}" placeholder="Full name"></div>
         <div class="field"><label class="lbl">Phone</label><input class="input" data-f="phone" value="${escA(l.phone)}" placeholder="(555) 123-4567"></div>
         <div class="field"><label class="lbl">Email</label><input class="input" data-f="email" value="${escA(l.email)}" placeholder="name@email.com"></div>
+        <div class="field"><label class="lbl">Stage</label><select class="input" data-f="stage">${STAGES.map(o => `<option ${(l.stage || 'New') === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
+        <div class="field"><label class="lbl">Source</label><input class="input" data-f="source" value="${escA(l.source)}" placeholder="Zillow, referral, open house..."></div>
         <div class="field"><label class="lbl">Intent</label>${sel('intent', INTENTS, l.intent)}</div>
         <div class="field"><label class="lbl">Timeline</label>${sel('timeline', TIMELINES, l.timeline)}</div>
         <div class="field"><label class="lbl">Financing</label>${sel('financing', FINANCING, l.financing)}</div>
@@ -327,7 +396,7 @@
         if (lead) await api('/api/realtor/leads/' + lead.id, { method: 'PATCH', body: JSON.stringify(body) });
         else await api('/api/realtor/leads', { method: 'POST', body: JSON.stringify(body) });
         toast(lead ? 'Lead updated' : 'Lead added');
-        renderLeads();
+        render();
       });
   }
 
@@ -352,6 +421,7 @@
 
     openModal(l.name, `
       <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <span class="badge ${stageTone(l.stage || 'New')}">${esc(l.stage || 'New')}</span>
         <span class="badge ${priBadge(r.priority)}">${r.priority} readiness</span>
         ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call"><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text"><i data-lucide="message-square"></i></a>` : ''}
         ${l.email ? `<a class="act" href="${mailLink(l.email)}" title="Email"><i data-lucide="mail"></i></a>` : ''}
@@ -379,7 +449,7 @@
     root.querySelector('[data-close-lead]').addEventListener('click', () => { closeModal(); closeLeadModal(l); });
     root.querySelector('[data-del]').addEventListener('click', async () => {
       if (!confirm('Delete this lead? This removes their notes and timeline.')) return;
-      await api('/api/realtor/leads/' + l.id, { method: 'DELETE' }); closeModal(); toast('Lead deleted'); renderLeads();
+      await api('/api/realtor/leads/' + l.id, { method: 'DELETE' }); closeModal(); toast('Lead deleted'); render();
     });
     root.querySelector('#note-add').addEventListener('click', async () => {
       const val = root.querySelector('#note-input').value.trim(); if (!val) return;
