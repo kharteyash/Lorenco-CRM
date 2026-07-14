@@ -756,6 +756,44 @@ app.delete('/api/realtor/leads/:id/notes/:noteId', safe(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Send a one-off email to a single person through the user's channel (their
+// connected Gmail first, else shared SMTP). Throws if neither is available.
+async function sendSingleEmail(userId, to, subject, body) {
+  const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
+  if (gmail) {
+    const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
+    const from = u && u.name ? `${u.name} <${gmail.email}>` : gmail.email;
+    await sendViaGmail(userId, from, to, subject, body);
+    return 'gmail';
+  }
+  const tx = mailer();
+  if (tx) {
+    await tx.sendMail({ from: mailFrom(), to, subject, text: body,
+      html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
+    return 'smtp';
+  }
+  throw new Error('Connect Gmail (or configure SMTP) to send email.');
+}
+
+// Email one lead directly; records it on the lead's timeline.
+app.post('/api/realtor/leads/:id/email', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const lead = await one('SELECT * FROM realtor_leads WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+  if (!lead.email) return res.status(400).json({ error: 'This lead has no email address — add one first.' });
+  const subject = String((req.body || {}).subject || '').trim().slice(0, 200);
+  const body = String((req.body || {}).body || '').trim().slice(0, 10000);
+  if (!subject) return res.status(400).json({ error: 'A subject is required.' });
+  if (!body) return res.status(400).json({ error: 'The message is empty.' });
+  const via = await sendSingleEmail(req.user.id, lead.email, subject, body);
+  // Log it to the timeline so the outreach is visible on the lead.
+  await pool.query('INSERT INTO realtor_lead_notes (realtor_id, lead_id, body) VALUES ($1,$2,$3)',
+    [req.user.id, id, `📧 Emailed — “${subject}”`]);
+  res.json({ ok: true, via });
+}));
+
 // ===================================================================
 // Contacts (address book)
 // ===================================================================

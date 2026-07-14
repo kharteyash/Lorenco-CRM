@@ -457,6 +457,7 @@
         ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call"><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text"><i data-lucide="message-square"></i></a>` : ''}
         ${l.email ? `<a class="act" href="${mailLink(l.email)}" title="Email"><i data-lucide="mail"></i></a>` : ''}
         <div class="ml-auto flex gap-1.5">
+          ${l.email ? `<button class="btn-ghost" data-email><i data-lucide="send"></i>Email</button>` : ''}
           <button class="btn-ghost" data-edit><i data-lucide="pencil"></i>Edit</button>
           <button class="btn-ghost" data-log><i data-lucide="phone-call"></i>Log call</button>
         </div>
@@ -475,6 +476,8 @@
       </div>`, null, null, { wide: true });
 
     const root = document.querySelector('.modal');
+    const emailBtn = root.querySelector('[data-email]');
+    if (emailBtn) emailBtn.addEventListener('click', () => { closeModal(); emailLeadModal(l); });
     root.querySelector('[data-edit]').addEventListener('click', () => { closeModal(); leadModal(l); });
     root.querySelector('[data-log]').addEventListener('click', () => { closeModal(); logCallModal(l); });
     root.querySelector('[data-close-lead]').addEventListener('click', () => { closeModal(); closeLeadModal(l); });
@@ -491,6 +494,45 @@
     root.querySelectorAll('[data-delnote]').forEach(b => b.addEventListener('click', async () => {
       await api('/api/realtor/leads/' + l.id + '/notes/' + b.dataset.delnote, { method: 'DELETE' }); leadDrawer(id);
     }));
+  }
+
+  // 1:1 email to a lead, sent via the agent's Gmail/SMTP and logged to the timeline.
+  function emailLeadModal(lead) {
+    const first = (lead.name || '').trim().split(/\s+/)[0] || 'there';
+    const agent = (me && me.name) || 'Your agent';
+    const fill = (t) => t.replace(/\{name\}/g, first).replace(/\{agent\}/g, agent);
+    const TEMPLATES = {
+      'Blank': { subject: '', body: '' },
+      'Intro': { subject: 'Great to connect, {name}', body: `Hi {name},\n\nThanks for reaching out — I'd love to help you with your move. When's a good time for a quick call this week?\n\nBest,\n{agent}` },
+      'Check-in': { subject: 'Checking in, {name}', body: `Hi {name},\n\nJust wanted to check in and see how your home search is going. Anything I can do to help right now?\n\nTalk soon,\n{agent}` },
+      'New listings': { subject: 'A few listings you might like', body: `Hi {name},\n\nA couple of new listings came up that match what you're looking for — want me to send them over or set up showings?\n\nBest,\n{agent}` },
+      'Thank you': { subject: 'Thank you, {name}!', body: `Hi {name},\n\nThank you for your time today — it was great talking. I'll follow up with the next steps shortly.\n\nBest,\n{agent}` }
+    };
+    const keys = Object.keys(TEMPLATES);
+    openModal('Email ' + lead.name, `
+      <p class="text-[12px] text-muted mb-3">Sends from your connected Gmail to <b>${escA(lead.email)}</b> and logs it on the timeline.</p>
+      <div class="field mb-3"><label class="lbl">Template</label>
+        <select class="input mt-1" id="tpl">${keys.map(k => `<option>${k}</option>`).join('')}</select></div>
+      <div class="field mb-3"><label class="lbl">Subject</label><input class="input mt-1" id="em-subj" value="${escA(fill(TEMPLATES.Intro.subject))}"></div>
+      <div class="field"><label class="lbl">Message</label><textarea class="input mt-1" id="em-bd" style="min-height:180px">${esc(fill(TEMPLATES.Intro.body))}</textarea></div>`,
+      'Send email', async (root) => {
+        const subject = root.querySelector('#em-subj').value.trim();
+        const body = root.querySelector('#em-bd').value.trim();
+        if (!subject) throw new Error('A subject is required.');
+        if (!body) throw new Error('The message is empty.');
+        const r = await api('/api/realtor/leads/' + lead.id + '/email', { method: 'POST', body: JSON.stringify({ subject, body }) });
+        toast('Email sent' + (r.via === 'gmail' ? ' via Gmail' : ''));
+        // Reopen the lead after this modal closes so the logged email shows.
+        setTimeout(() => { if (active === 'leads' || active === 'pipeline') leadDrawer(lead.id); }, 20);
+      });
+    const root = document.querySelector('.modal');
+    // Default the picker to Intro (already prefilled) and swap on change.
+    root.querySelector('#tpl').value = 'Intro';
+    root.querySelector('#tpl').addEventListener('change', (e) => {
+      const t = TEMPLATES[e.target.value] || TEMPLATES.Blank;
+      root.querySelector('#em-subj').value = fill(t.subject);
+      root.querySelector('#em-bd').value = fill(t.body);
+    });
   }
 
   function logCallModal(lead) {
