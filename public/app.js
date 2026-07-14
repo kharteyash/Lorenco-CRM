@@ -56,6 +56,7 @@
     { id: 'clients',  label: 'Past Clients', icon: 'user-check' },
     { id: 'contacts', label: 'Contacts',     icon: 'contact' },
     { id: 'calls',    label: 'Calls',        icon: 'phone' },
+    { id: 'calendar', label: 'Calendar',     icon: 'calendar' },
     { id: 'tasks',    label: 'Follow-ups',   icon: 'list-checks' },
     { id: 'emails',   label: 'Auto Emails',  icon: 'mail' },
     { id: 'settings', label: 'Settings',     icon: 'settings' }
@@ -160,7 +161,7 @@
   function render() {
     const v = $('view');
     v.innerHTML = `<div class="empty"><i data-lucide="loader"></i></div>`; icons();
-    const fn = { home: renderHome, pipeline: renderPipeline, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
+    const fn = { home: renderHome, pipeline: renderPipeline, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, calendar: renderCalendar, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
     (fn || renderHome)();
   }
 
@@ -727,6 +728,104 @@
     $('view').querySelectorAll('[data-log]').forEach(b => b.addEventListener('click', () => {
       const x = queue.find(q => q.leadId == b.dataset.log); logCallModal({ id: x.leadId, name: x.name, phone: x.phone });
     }));
+  }
+
+  // ---------- Calendar & appointments ----------
+  const APPT_TYPES = ['Showing', 'Open House', 'Closing', 'Call', 'Meeting', 'Other'];
+  const apptTone = (t) => ({ 'Showing': 'blue', 'Open House': 'purple', 'Closing': 'green', 'Call': 'amber', 'Meeting': 'gray', 'Other': 'gray' }[t] || 'gray');
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const ymd = (y, m, d) => `${y}-${pad2(m + 1)}-${pad2(d)}`;
+  function fmtTime(t) {
+    if (!t || !/^\d{2}:\d{2}$/.test(t)) return '';
+    let [h, m] = t.split(':').map(Number); const ap = h < 12 ? 'am' : 'pm'; h = h % 12 || 12;
+    return m ? `${h}:${pad2(m)}${ap}` : `${h}${ap}`;
+  }
+  let calY, calM; // visible month
+  async function renderCalendar() {
+    const today = new Date();
+    if (calY == null) { calY = today.getFullYear(); calM = today.getMonth(); }
+    const first = new Date(calY, calM, 1);
+    const startDay = first.getDay();
+    const daysIn = new Date(calY, calM + 1, 0).getDate();
+    const from = ymd(calY, calM, 1), to = ymd(calY, calM, daysIn);
+    let appts = [];
+    try { appts = await api(`/api/realtor/appointments?from=${from}&to=${to}`); } catch (e) { return errView(e); }
+    const byDay = {}; appts.forEach(a => (byDay[a.date] = byDay[a.date] || []).push(a));
+    const todayStr = ymd(today.getFullYear(), today.getMonth(), today.getDate());
+
+    const cells = [];
+    for (let i = 0; i < startDay; i++) cells.push(`<div class="cal-cell empty"></div>`);
+    for (let d = 1; d <= daysIn; d++) {
+      const ds = ymd(calY, calM, d);
+      const items = byDay[ds] || [];
+      const chips = items.slice(0, 3).map(a => `<div class="cal-chip ${apptTone(a.type)}" data-appt="${a.id}" title="${escA(a.title)}">${a.start ? `<b>${fmtTime(a.start)}</b> ` : ''}${esc(a.title)}</div>`).join('');
+      const more = items.length > 3 ? `<div class="cal-more">+${items.length - 3} more</div>` : '';
+      cells.push(`<div class="cal-cell ${ds === todayStr ? 'today' : ''}" data-day="${ds}">
+        <div class="cal-daynum">${d}</div>${chips}${more}</div>`);
+    }
+    while (cells.length % 7 !== 0) cells.push(`<div class="cal-cell empty"></div>`);
+
+    const upcoming = appts.filter(a => a.date >= todayStr).slice(0, 6);
+    $('view').innerHTML = `
+      ${pageHead('Calendar', 'Showings, open houses, closings — your week at a glance.', `<button class="btn-primary" id="cal-add"><i data-lucide="plus"></i>New appointment</button>`)}
+      <div class="panel p-4">
+        <div class="flex items-center gap-2 mb-3">
+          <button class="icon-btn" id="cal-prev"><i data-lucide="chevron-left"></i></button>
+          <div class="text-[15px] font-bold" style="min-width:150px;text-align:center">${first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</div>
+          <button class="icon-btn" id="cal-next"><i data-lucide="chevron-right"></i></button>
+          <button class="btn-ghost" id="cal-today" style="margin-left:6px">Today</button>
+        </div>
+        <div class="cal-grid cal-head">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
+        <div class="cal-grid">${cells.join('')}</div>
+      </div>
+      ${upcoming.length ? `<div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Upcoming</h3>
+        ${upcoming.map(a => `<div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0" data-appt="${a.id}" style="cursor:pointer">
+          <div class="stat-icon badge ${apptTone(a.type)}" style="width:34px;height:34px;border-radius:9px;flex-direction:column"><i data-lucide="calendar" style="width:15px;height:15px"></i></div>
+          <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(a.title)}</div>
+            <div class="text-[11.5px] text-muted truncate">${esc(a.type)}${a.leadName ? ' · ' + esc(a.leadName) : ''}${a.location ? ' · ' + esc(a.location) : ''}</div></div>
+          <div class="text-[12px] text-muted text-right" style="flex-shrink:0">${fmtDate(a.date)}${a.start ? '<br>' + fmtTime(a.start) : ''}</div>
+        </div>`).join('')}</div>` : ''}`;
+    icons();
+    $('cal-add').addEventListener('click', () => apptModal(null, todayStr));
+    $('cal-prev').addEventListener('click', () => { calM--; if (calM < 0) { calM = 11; calY--; } renderCalendar(); });
+    $('cal-next').addEventListener('click', () => { calM++; if (calM > 11) { calM = 0; calY++; } renderCalendar(); });
+    $('cal-today').addEventListener('click', () => { calY = today.getFullYear(); calM = today.getMonth(); renderCalendar(); });
+    $('view').querySelectorAll('[data-day]').forEach(c => c.addEventListener('click', (e) => { if (e.target.closest('[data-appt]')) return; apptModal(null, c.dataset.day); }));
+    $('view').querySelectorAll('[data-appt]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); const a = appts.find(x => x.id == el.dataset.appt); if (a) apptModal(a, a.date); }));
+  }
+  async function apptModal(appt, presetDate) {
+    let leads = leadCache;
+    if (!leads.length) { try { leads = await api('/api/realtor/leads'); } catch (e) {} }
+    const a = appt || {};
+    openModal(appt ? 'Edit appointment' : 'New appointment', `
+      <div class="grid-form">
+        <div class="field full"><label class="lbl">Title *</label><input class="input" data-f="title" value="${escA(a.title)}" placeholder="Showing at 123 Main St"></div>
+        <div class="field"><label class="lbl">Type</label><select class="input" data-f="type">${APPT_TYPES.map(o => `<option ${(a.type || 'Showing') === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
+        <div class="field"><label class="lbl">Date *</label><input class="input" type="date" data-f="date" value="${escA(a.date || presetDate || '')}"></div>
+        <div class="field"><label class="lbl">Start</label><input class="input" type="time" data-f="start" value="${escA(a.start)}"></div>
+        <div class="field"><label class="lbl">End</label><input class="input" type="time" data-f="end" value="${escA(a.end)}"></div>
+        <div class="field full"><label class="lbl">Location</label><input class="input" data-f="location" value="${escA(a.location)}" placeholder="Address or place"></div>
+        <div class="field full"><label class="lbl">Link to lead (optional)</label>
+          <select class="input" data-f="leadId"><option value="">— None —</option>${leads.map(l => `<option value="${l.id}" ${a.leadId === l.id ? 'selected' : ''}>${escA(l.name)}</option>`).join('')}</select></div>
+        <div class="field full"><label class="lbl">Notes</label><textarea class="input" data-f="notes">${esc(a.notes)}</textarea></div>
+      </div>
+      ${appt ? `<div class="mt-3"><button class="btn-ghost" data-del-appt style="color:#C23B3B"><i data-lucide="trash-2"></i>Delete appointment</button></div>` : ''}`,
+      appt ? 'Save' : 'Add appointment', async (root) => {
+        const body = collect(root);
+        if (!body.title) throw new Error('A title is required.');
+        if (!body.date) throw new Error('A date is required.');
+        body.leadId = body.leadId ? Number(body.leadId) : null;
+        if (appt) await api('/api/realtor/appointments/' + appt.id, { method: 'PATCH', body: JSON.stringify(body) });
+        else await api('/api/realtor/appointments', { method: 'POST', body: JSON.stringify(body) });
+        toast(appt ? 'Appointment updated' : 'Appointment added');
+        renderCalendar();
+      });
+    const delBtn = document.querySelector('.modal [data-del-appt]');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      if (!confirm('Delete this appointment?')) return;
+      try { await api('/api/realtor/appointments/' + appt.id, { method: 'DELETE' }); closeModal(); toast('Appointment deleted'); renderCalendar(); }
+      catch (e) { toast(e.message, 'alert-triangle'); }
+    });
   }
 
   // ---------- Follow-ups (tasks) ----------

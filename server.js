@@ -232,6 +232,22 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS realtor_tasks_owner ON realtor_tasks (realtor_id, id);
 
+  -- Appointments / calendar (showings, open houses, closings, calls, meetings).
+  CREATE TABLE IF NOT EXISTS realtor_appointments (
+    id         SERIAL PRIMARY KEY,
+    realtor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lead_id    INTEGER REFERENCES realtor_leads(id) ON DELETE SET NULL,
+    title      TEXT NOT NULL,
+    type       TEXT DEFAULT 'Showing',  -- Showing | Open House | Closing | Call | Meeting | Other
+    date       TEXT NOT NULL,           -- YYYY-MM-DD
+    start_time TEXT,                    -- HH:MM (24h)
+    end_time   TEXT,
+    location   TEXT,
+    notes      TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS realtor_appts_owner ON realtor_appointments (realtor_id, date);
+
   -- Append-only, timestamped notes on a realtor's lead (the activity timeline).
   CREATE TABLE IF NOT EXISTS realtor_lead_notes (
     id         SERIAL PRIMARY KEY,
@@ -1161,6 +1177,89 @@ app.get('/api/realtor/home', safe(async (req, res) => {
     tasksToday,
     activity: activity.slice(0, 15)
   });
+}));
+
+// ===================================================================
+// Appointments / calendar
+// ===================================================================
+const APPT_TYPES = ['Showing', 'Open House', 'Closing', 'Call', 'Meeting', 'Other'];
+function apptRowToJson(r) {
+  return {
+    id: r.id, leadId: r.lead_id || null, leadName: r.lead_name || '',
+    title: r.title, type: r.type || 'Other', date: r.date,
+    start: r.start_time || '', end: r.end_time || '', location: r.location || '', notes: r.notes || ''
+  };
+}
+function cleanAppt(b) {
+  const s = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
+  const t = (v) => { const x = s(v, 5); return /^\d{2}:\d{2}$/.test(x) ? x : ''; };
+  const date = s(b.date, 10);
+  return {
+    title: s(b.title, 160),
+    type: APPT_TYPES.includes(s(b.type, 20)) ? s(b.type, 20) : 'Showing',
+    date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : '',
+    start: t(b.start), end: t(b.end),
+    location: s(b.location, 200), notes: s(b.notes, 2000),
+    leadId: Number.isInteger(b.leadId) ? b.leadId : null
+  };
+}
+
+// List appointments, optionally within a [from,to] date range (inclusive).
+app.get('/api/realtor/appointments', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from || '')) ? req.query.from : null;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to || '')) ? req.query.to : null;
+  const params = [req.user.id];
+  let where = 'a.realtor_id = $1';
+  if (from) { params.push(from); where += ` AND a.date >= $${params.length}`; }
+  if (to) { params.push(to); where += ` AND a.date <= $${params.length}`; }
+  const rows = await q(`SELECT a.*, l.name AS lead_name FROM realtor_appointments a
+                        LEFT JOIN realtor_leads l ON l.id = a.lead_id
+                        WHERE ${where} ORDER BY a.date, a.start_time NULLS FIRST, a.id`, params);
+  res.json(rows.map(apptRowToJson));
+}));
+
+app.post('/api/realtor/appointments', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const f = cleanAppt(req.body || {});
+  if (!f.title) return res.status(400).json({ error: 'A title is required.' });
+  if (!f.date) return res.status(400).json({ error: 'A date is required.' });
+  const leadId = await ownRealtorLead(req.user.id, f.leadId);
+  const row = await one(
+    `INSERT INTO realtor_appointments (realtor_id, lead_id, title, type, date, start_time, end_time, location, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [req.user.id, leadId, f.title, f.type, f.date, f.start || null, f.end || null, f.location, f.notes]
+  );
+  const withName = await one(`SELECT a.*, l.name AS lead_name FROM realtor_appointments a LEFT JOIN realtor_leads l ON l.id = a.lead_id WHERE a.id = $1`, [row.id]);
+  res.json(apptRowToJson(withName));
+}));
+
+app.patch('/api/realtor/appointments/:id', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const cur = await one('SELECT id FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
+  if (!cur) return res.status(404).json({ error: 'Appointment not found.' });
+  const f = cleanAppt(req.body || {});
+  if (!f.title) return res.status(400).json({ error: 'A title is required.' });
+  if (!f.date) return res.status(400).json({ error: 'A date is required.' });
+  const leadId = await ownRealtorLead(req.user.id, f.leadId);
+  await pool.query(
+    `UPDATE realtor_appointments SET lead_id=$1, title=$2, type=$3, date=$4, start_time=$5, end_time=$6, location=$7, notes=$8
+     WHERE id=$9 AND realtor_id=$10`,
+    [leadId, f.title, f.type, f.date, f.start || null, f.end || null, f.location, f.notes, id, req.user.id]
+  );
+  const row = await one(`SELECT a.*, l.name AS lead_name FROM realtor_appointments a LEFT JOIN realtor_leads l ON l.id = a.lead_id WHERE a.id = $1`, [id]);
+  res.json(apptRowToJson(row));
+}));
+
+app.delete('/api/realtor/appointments/:id', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const r = await pool.query('DELETE FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'Appointment not found.' });
+  res.json({ ok: true });
 }));
 
 // ===================================================================
