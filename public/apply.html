@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Get in touch</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    body { background: var(--bg); }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 32px 16px 64px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="content">
+      <div class="empty"><i data-lucide="loader"></i></div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escA = s => esc(s).replace(/"/g, '&quot;');
+    const $ = id => document.getElementById(id);
+    const icons = () => { if (window.lucide) lucide.createIcons(); };
+    const token = decodeURIComponent(location.pathname.split('/apply/')[1] || '');
+    const TIMELINES = ['ASAP', '1-3 months', '3-6 months', '6+ months', 'Just browsing'];
+    const INTENTS = ['Buying', 'Selling', 'Both'];
+    const FINANCING = ['Pre-approved', 'Needs a lender', 'Paying cash', 'Not sure'];
+
+    function api(url, opts) {
+      return fetch(url, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+        .then(async r => { let d = null; try { d = await r.json(); } catch (e) {} if (!r.ok) throw new Error((d && d.error) || 'Something went wrong.'); return d; });
+    }
+    const sel = (name, opts) => `<select class="input" data-f="${name}"><option value="">—</option>${opts.map(o => `<option>${o}</option>`).join('')}</select>`;
+
+    function renderForm(agent) {
+      $('content').innerHTML = `
+        <div class="flex items-center gap-2 mb-5">
+          <div class="brand-mark"><i data-lucide="home"></i></div>
+          <span class="text-[20px] font-extrabold tracking-tight">LeadNest</span>
+        </div>
+        <div class="panel p-6">
+          <h1 class="text-[22px] font-bold tracking-tight">Let's work together</h1>
+          <p class="text-[13.5px] text-muted mt-1 mb-5">Tell ${agent ? esc(agent) : 'us'} a bit about what you're looking for and we'll be in touch.</p>
+          <div class="grid-form">
+            <div class="field"><label class="lbl">Your name *</label><input class="input" data-f="name" placeholder="Full name" autocomplete="name"></div>
+            <div class="field"><label class="lbl">Phone</label><input class="input" data-f="phone" placeholder="(555) 123-4567" autocomplete="tel"></div>
+            <div class="field full"><label class="lbl">Email</label><input class="input" data-f="email" placeholder="name@email.com" autocomplete="email"></div>
+            <div class="field"><label class="lbl">I'm looking to</label>${sel('intent', INTENTS)}</div>
+            <div class="field"><label class="lbl">Timeline</label>${sel('timeline', TIMELINES)}</div>
+            <div class="field"><label class="lbl">Budget</label><input class="input" data-f="budget" placeholder="$400k–$500k"></div>
+            <div class="field"><label class="lbl">Area / city</label><input class="input" data-f="area" placeholder="Austin, TX"></div>
+            <div class="field full"><label class="lbl">Financing</label>${sel('financing', FINANCING)}</div>
+            <div class="field full"><label class="lbl">Anything else?</label><textarea class="input" data-f="notes" placeholder="What you're looking for, questions, timing..."></textarea></div>
+          </div>
+          <!-- honeypot: hidden from people, catches bots -->
+          <input type="text" data-f="website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
+          <div id="msg" class="text-[12.5px] font-medium text-rose-500 mt-3 min-h-[16px]"></div>
+          <button id="submit" class="btn-primary w-full justify-center mt-2">Send</button>
+        </div>
+        <p class="text-[11.5px] text-muted text-center mt-4">Powered by LeadNest</p>`;
+      icons();
+      $('submit').addEventListener('click', submit);
+    }
+    function collect() { const o = {}; document.querySelectorAll('[data-f]').forEach(el => o[el.dataset.f] = el.value.trim()); return o; }
+    async function submit() {
+      const msg = $('msg'); msg.textContent = '';
+      const body = collect();
+      if (!body.name) { msg.textContent = 'Please enter your name.'; return; }
+      if (!body.phone && !body.email) { msg.textContent = 'Please add a phone number or email.'; return; }
+      const btn = $('submit'); btn.disabled = true; btn.textContent = 'Sending...';
+      try {
+        await api('/api/public/leads/' + encodeURIComponent(token), { method: 'POST', body: JSON.stringify(body) });
+        renderThanks(body.name);
+      } catch (e) { msg.textContent = e.message; btn.disabled = false; btn.textContent = 'Send'; }
+    }
+    function renderThanks(name) {
+      $('content').innerHTML = `
+        <div class="panel p-8 text-center">
+          <div class="mx-auto mb-4 stat-icon badge green" style="width:56px;height:56px;border-radius:16px"><i data-lucide="check" style="width:28px;height:28px"></i></div>
+          <h1 class="text-[22px] font-bold tracking-tight">Thanks${name ? ', ' + esc(name.split(/\s+/)[0]) : ''}!</h1>
+          <p class="text-[13.5px] text-muted mt-2">Your details are in — expect to hear back soon.</p>
+        </div>`;
+      icons();
+    }
+    function renderInvalid(m) {
+      $('content').innerHTML = `<div class="panel p-8 text-center">
+        <div class="mx-auto mb-4 stat-icon badge red" style="width:56px;height:56px;border-radius:16px"><i data-lucide="link-2-off" style="width:26px;height:26px"></i></div>
+        <h1 class="text-[19px] font-bold">Form unavailable</h1>
+        <p class="text-[13.5px] text-muted mt-2">${esc(m)}</p></div>`;
+      icons();
+    }
+
+    if (!token) { renderInvalid('This form link is missing its code.'); return; }
+    api('/api/public/capture/' + encodeURIComponent(token))
+      .then(d => renderForm(d.agent))
+      .catch(e => renderInvalid(e.message));
+  })();
+  </script>
+</body>
+</html>

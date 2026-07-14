@@ -134,6 +134,9 @@ const SCHEMA = `
   CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (lower(email));
   ALTER TABLE users ADD COLUMN IF NOT EXISTS tz TEXT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_tasks_enabled BOOLEAN DEFAULT TRUE;
+  -- Public lead-capture form token (the shareable /apply/<token> intake link).
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS capture_token TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS users_capture_token_idx ON users (capture_token);
 
   CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,
@@ -661,6 +664,57 @@ app.post('/api/realtor/leads/import', safe(async (req, res) => {
     imported++;
   }
   res.json({ ok: true, imported, skipped });
+}));
+
+// ----- Public lead-capture form -----
+async function ensureCaptureToken(userId) {
+  const u = await one('SELECT capture_token FROM users WHERE id = $1', [userId]);
+  if (u && u.capture_token) return u.capture_token;
+  const token = crypto.randomBytes(9).toString('base64url'); // ~12 url-safe chars
+  await q('UPDATE users SET capture_token = $1 WHERE id = $2', [token, userId]);
+  return token;
+}
+const captureUrl = (req, token) => `${req.protocol}://${req.get('host')}/apply/${token}`;
+
+// The agent fetches (and lazily creates) their shareable intake link.
+app.get('/api/realtor/capture', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const token = await ensureCaptureToken(req.user.id);
+  res.json({ token, url: captureUrl(req, token) });
+}));
+// Rotate the link (old one stops working).
+app.post('/api/realtor/capture/regenerate', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const token = crypto.randomBytes(9).toString('base64url');
+  await q('UPDATE users SET capture_token = $1 WHERE id = $2', [token, req.user.id]);
+  res.json({ token, url: captureUrl(req, token) });
+}));
+
+// Public: validate a link + personalize the form ("Work with <agent>").
+app.get('/api/public/capture/:token', safe(async (req, res) => {
+  const u = await one('SELECT name FROM users WHERE capture_token = $1', [String(req.params.token || '')]);
+  if (!u) return res.status(404).json({ error: 'This form link is invalid or has been turned off.' });
+  res.json({ ok: true, agent: u.name });
+}));
+
+// Public: accept a form submission → create a lead for that agent.
+app.post('/api/public/leads/:token', safe(async (req, res) => {
+  if (!rateLimit('capture:' + req.ip, 20, 10 * 60 * 1000)) {
+    return res.status(429).json({ error: 'Too many submissions. Please try again in a bit.' });
+  }
+  const owner = await one('SELECT id FROM users WHERE capture_token = $1', [String(req.params.token || '')]);
+  if (!owner) return res.status(404).json({ error: 'This form link is invalid or has been turned off.' });
+  const b = req.body || {};
+  if (String(b.website || '').trim()) return res.json({ ok: true }); // honeypot: silently drop bots
+  const f = cleanRealtorLead(b);
+  if (!f.name) return res.status(400).json({ error: 'Please enter your name.' });
+  if (!f.phone && !f.email) return res.status(400).json({ error: 'Please add a phone number or email so we can reach you.' });
+  await pool.query(
+    `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'New',$15)`,
+    [owner.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, 'Intake form']
+  );
+  res.json({ ok: true });
 }));
 
 // ----- Lead activity timeline: notes + logged calls, newest first -----
@@ -1384,6 +1438,9 @@ setInterval(() => { dispatchWeeklyEmails().catch(e => console.error('weekly time
 // Static files + start
 // ===================================================================
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+
+// Public lead-capture form (standalone page; reads its token from the URL).
+app.get('/apply/:token', (req, res) => res.sendFile(path.join(__dirname, 'public', 'apply.html')));
 
 // SPA fallback: any non-API GET serves the app shell (client-side routing).
 app.get('*', (req, res, next) => {

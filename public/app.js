@@ -309,6 +309,7 @@
     try { leadCache = await api('/api/realtor/leads'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
       ${pageHead('Leads', 'Your book of business — everyone you\'re working.', `
+        <button class="btn-ghost" id="lead-intake"><i data-lucide="share-2"></i>Intake form</button>
         <button class="btn-ghost" id="lead-import"><i data-lucide="upload"></i>Import CSV</button>
         <button class="btn-primary" id="lead-add"><i data-lucide="plus"></i>Add lead</button>`)}
       <div class="panel">
@@ -322,10 +323,40 @@
       <input type="file" id="lead-file" accept=".csv" class="hidden">`;
     icons();
     $('lead-add').addEventListener('click', () => leadModal(null));
+    $('lead-intake').addEventListener('click', intakeModal);
     $('lead-import').addEventListener('click', () => $('lead-file').click());
     $('lead-file').addEventListener('change', importLeadsCsv);
     $('lead-search').addEventListener('input', e => { leadQuery = e.target.value; drawLeads(); });
     drawLeads();
+  }
+
+  // Shareable public intake-form link.
+  async function intakeModal() {
+    let data;
+    try { data = await api('/api/realtor/capture'); } catch (e) { return toast(e.message, 'alert-triangle'); }
+    openModal('Your intake form', `
+      <p class="text-[12.5px] text-muted mb-3">Share this link on your website, social bio, or email signature. Anyone who fills it out lands straight in your Leads (marked <b>Intake form</b>).</p>
+      <div class="field mb-2"><label class="lbl">Your form link</label>
+        <div class="flex gap-2 mt-1">
+          <input id="intake-url" class="input" readonly value="${escA(data.url)}">
+          <button class="btn-primary" id="intake-copy" style="flex-shrink:0"><i data-lucide="copy"></i>Copy</button>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3">
+        <a class="btn-ghost" href="${escA(data.url)}" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Preview form</a>
+        <button class="btn-ghost" id="intake-regen" style="color:#C23B3B"><i data-lucide="refresh-cw"></i>Reset link</button>
+      </div>`, null, null, { wide: false });
+    const root = document.querySelector('.modal');
+    root.querySelector('#intake-copy').addEventListener('click', async () => {
+      const url = root.querySelector('#intake-url').value;
+      try { await navigator.clipboard.writeText(url); toast('Link copied'); }
+      catch (e) { root.querySelector('#intake-url').select(); document.execCommand('copy'); toast('Link copied'); }
+    });
+    root.querySelector('#intake-regen').addEventListener('click', async () => {
+      if (!confirm('Reset your link? The current one will stop working immediately.')) return;
+      try { const d = await api('/api/realtor/capture/regenerate', { method: 'POST' }); root.querySelector('#intake-url').value = d.url; toast('New link created'); }
+      catch (e) { toast(e.message, 'alert-triangle'); }
+    });
   }
   function drawLeads() {
     const t = $('lead-table'); if (!t) return;
@@ -407,7 +438,7 @@
     const r = clientScore(l);
     const info = [
       ['Intent', l.intent], ['Timeline', l.timeline], ['Financing', l.financing], ['Credit', l.creditScore],
-      ['Budget', l.budget], ['Property', l.propertyType], ['Area', l.area], ['Zip', l.zipcode], ['Assets', l.assets]
+      ['Budget', l.budget], ['Property', l.propertyType], ['Area', l.area], ['Zip', l.zipcode], ['Assets', l.assets], ['Source', l.source]
     ].filter(x => x[1]).map(x => `<div><div class="lbl">${x[0]}</div><div class="text-[13px] font-medium">${esc(x[1])}</div></div>`).join('');
     const timeline = tl.items.length ? tl.items.map(it => {
       if (it.kind === 'call') return `<div class="flex items-start gap-2.5 py-2 border-b border-[var(--border)] last:border-0">
