@@ -58,6 +58,7 @@
     { id: 'calls',    label: 'Calls',        icon: 'phone' },
     { id: 'calendar', label: 'Calendar',     icon: 'calendar' },
     { id: 'tasks',    label: 'Follow-ups',   icon: 'list-checks' },
+    { id: 'reports',  label: 'Reports',      icon: 'bar-chart-3' },
     { id: 'emails',   label: 'Auto Emails',  icon: 'mail' },
     { id: 'settings', label: 'Settings',     icon: 'settings' }
   ];
@@ -161,7 +162,7 @@
   function render() {
     const v = $('view');
     v.innerHTML = `<div class="empty"><i data-lucide="loader"></i></div>`; icons();
-    const fn = { home: renderHome, pipeline: renderPipeline, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, calendar: renderCalendar, tasks: renderTasks, emails: renderEmails, settings: renderSettings }[active];
+    const fn = { home: renderHome, pipeline: renderPipeline, leads: renderLeads, clients: renderClients, contacts: renderContacts, calls: renderCalls, calendar: renderCalendar, tasks: renderTasks, reports: renderReports, emails: renderEmails, settings: renderSettings }[active];
     (fn || renderHome)();
   }
 
@@ -212,13 +213,42 @@
         <div class="min-w-0 flex-1"><div class="text-[12.5px]">${esc(a.text)}</div><div class="text-[11px] text-muted">${fmtWhen(a.at)}</div></div>
       </div>`).join('') : `<div class="text-[13px] text-muted py-4 text-center">No recent activity yet.</div>`;
 
+    const sched = (d.scheduleToday || []);
+    const schedule = sched.length ? sched.map(a => `
+      <div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0" data-appt-go="1">
+        <div class="stat-icon badge ${apptTone(a.type)}" style="width:34px;height:34px;border-radius:9px"><i data-lucide="calendar" style="width:15px;height:15px"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(a.title)}</div>
+          <div class="text-[11.5px] text-muted truncate">${esc(a.type)}${a.leadName ? ' · ' + esc(a.leadName) : ''}${a.location ? ' · ' + esc(a.location) : ''}</div></div>
+        ${a.start ? `<div class="text-[12px] text-muted num" style="flex-shrink:0">${fmtTimeSafe(a.start)}</div>` : ''}
+      </div>`).join('') : `<div class="text-[13px] text-muted py-4 text-center">No appointments today. <a href="#calendar" class="font-semibold text-[var(--accent)]">Add one →</a></div>`;
+
+    const pipe = (d.pipeline || []);
+    const pipeTotal = pipe.reduce((n, s) => n + s.count, 0);
+    const pipeline = `<div class="flex flex-col gap-2.5">${pipe.map(s => {
+      const pct = pipeTotal ? Math.round((s.count / pipeTotal) * 100) : 0;
+      return `<a href="#pipeline" class="block">
+        <div class="flex items-center justify-between text-[12px] mb-1"><span class="font-semibold">${s.stage}</span><span class="text-muted num">${s.count}</span></div>
+        <div style="height:7px;border-radius:4px;background:var(--surface-3);overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px"></div></div>
+      </a>`;
+    }).join('')}</div>`;
+
     $('view').innerHTML = `
       ${pageHead('Hi ' + (me.name.split(/\s+/)[0]) + ' 👋', "Here's what needs your attention today.", `<a class="btn-primary" href="#leads" onclick="event.preventDefault();location.hash='leads'"><i data-lucide="plus"></i>Add a lead</a>`)}
       <div class="grid-stats mb-6">
         ${stat('users', 'blue', d.stats.activeLeads, 'Active leads')}
-        ${stat('phone-call', 'amber', d.stats.callsToday, 'To call')}
+        ${stat('calendar-clock', 'purple', d.stats.apptsToday || 0, 'Appointments today')}
         ${stat('list-checks', 'red', d.stats.tasksDue, 'Follow-ups due')}
         ${stat('user-check', 'green', d.stats.pastClients, 'Past clients')}
+      </div>
+      <div class="grid-2 mb-5">
+        <div class="panel p-4">
+          <div class="flex items-center justify-between mb-1"><h3 class="text-[14px] font-bold">Today's schedule</h3><a href="#calendar" class="text-[12px] font-semibold text-[var(--accent)]">Calendar →</a></div>
+          ${schedule}
+        </div>
+        <div class="panel p-4">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-[14px] font-bold">Pipeline</h3><a href="#pipeline" class="text-[12px] font-semibold text-[var(--accent)]">Board →</a></div>
+          ${pipeline}
+        </div>
       </div>
       <div class="grid-2">
         <div class="panel p-4">
@@ -232,10 +262,17 @@
       </div>
       <div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Recent activity</h3>${feed}</div>`;
     icons();
+    $('view').querySelectorAll('[data-appt-go]').forEach(el => el.addEventListener('click', () => { location.hash = 'calendar'; }));
     $('view').querySelectorAll('[data-done]').forEach(b => b.addEventListener('click', async () => {
       try { await api('/api/realtor/tasks/' + b.dataset.done, { method: 'PATCH', body: JSON.stringify({ status: 'done' }) }); toast('Marked done'); renderHome(); }
       catch (e) { toast(e.message, 'alert-triangle'); }
     }));
+  }
+  // Safe time formatter usable before the calendar module's fmtTime is defined at call sites.
+  function fmtTimeSafe(t) {
+    if (!t || !/^\d{2}:\d{2}$/.test(t)) return '';
+    let [h, m] = t.split(':').map(Number); const ap = h < 12 ? 'am' : 'pm'; h = h % 12 || 12;
+    return m ? `${h}:${String(m).padStart(2, '0')}${ap}` : `${h}${ap}`;
   }
   function errView(e) { $('view').innerHTML = `<div class="panel p-8">${emptyState('alert-triangle', 'Something went wrong', e.message)}</div>`; icons(); }
 
@@ -1039,6 +1076,72 @@
       try { const r = await api('/api/realtor/emails/send-now', { method: 'POST' }); toast(`Sent to ${r.sent} of ${r.recipients}`); renderEmails(); }
       catch (e) { toast(e.message, 'alert-triangle'); btn.disabled = false; }
     });
+  }
+
+  // ---------- Reports ----------
+  function money(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return '$' + (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+    if (n >= 1e3) return '$' + Math.round(n / 1e3) + 'k';
+    return '$' + n.toLocaleString();
+  }
+  async function renderReports() {
+    let d;
+    try { d = await api('/api/realtor/reports'); } catch (e) { return errView(e); }
+    const stat = (icon, tone, val, label) => `<div class="panel stat">
+      <div class="stat-icon badge ${tone}" style="border-radius:11px"><i data-lucide="${icon}"></i></div>
+      <div><div class="text-[22px] font-bold leading-none">${val}</div><div class="text-[12px] text-muted mt-1">${label}</div></div></div>`;
+
+    // Funnel: stages + closed, as proportional bars.
+    const funnelRows = d.funnel.concat([{ stage: 'Closed', count: d.closedTotal }]);
+    const maxF = Math.max(1, ...funnelRows.map(f => f.count));
+    const funnel = funnelRows.map(f => {
+      const pct = Math.round((f.count / maxF) * 100);
+      const tone = f.stage === 'Closed' ? 'var(--accent)' : 'var(--accent-2, var(--accent))';
+      return `<div class="mb-2.5">
+        <div class="flex items-center justify-between text-[12.5px] mb-1"><span class="font-semibold">${f.stage}</span><span class="text-muted num">${f.count}</span></div>
+        <div style="height:22px;border-radius:6px;background:var(--surface-3);overflow:hidden">
+          <div style="height:100%;width:${Math.max(pct, f.count ? 6 : 0)}%;background:${tone};border-radius:6px;transition:width .3s"></div></div>
+      </div>`;
+    }).join('');
+
+    // Source ROI table.
+    const maxSrc = Math.max(1, ...d.sources.map(s => s.leads + s.closed));
+    const srcRows = d.sources.length ? d.sources.map(s => {
+      const total = s.leads + s.closed;
+      const conv = total ? Math.round((s.closed / total) * 100) : 0;
+      return `<tr>
+        <td class="font-semibold">${esc(s.source)}</td>
+        <td class="num">${s.leads}</td>
+        <td class="num">${s.closed}</td>
+        <td class="num">${conv}%</td>
+        <td style="width:120px"><div style="height:8px;border-radius:4px;background:var(--surface-3);overflow:hidden"><div style="height:100%;width:${Math.round((total / maxSrc) * 100)}%;background:var(--accent);border-radius:4px"></div></div></td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="5"><div class="text-[13px] text-muted py-6 text-center">No lead sources yet. Add a source when creating leads (or use the intake form).</div></td></tr>`;
+
+    $('view').innerHTML = `
+      ${pageHead('Reports', 'Your funnel, this month\'s production, and where deals come from.', '')}
+      <div class="grid-stats mb-6">
+        ${stat('trending-up', 'blue', d.month.newLeads, 'New leads this month')}
+        ${stat('handshake', 'green', d.month.deals, 'Deals closed this month')}
+        ${stat('dollar-sign', 'amber', money(d.month.volume), 'Volume this month')}
+        ${stat('percent', 'purple', d.totals.conversion + '%', 'Lead → close rate')}
+      </div>
+      <div class="grid-2">
+        <div class="panel p-5">
+          <h3 class="text-[14px] font-bold mb-3">Pipeline funnel</h3>
+          ${funnel}
+          <div class="text-[12px] text-muted mt-3 pt-3 border-t border-[var(--border)]">All-time closed volume: <b>${money(d.totals.volume)}</b> across ${d.closedTotal} deal${d.closedTotal === 1 ? '' : 's'}.</div>
+        </div>
+        <div class="panel p-5">
+          <h3 class="text-[14px] font-bold mb-1">Lead sources</h3>
+          <p class="text-[12px] text-muted mb-3">Which channels bring leads — and which actually close.</p>
+          <div style="overflow-x:auto"><table class="tbl">
+            <thead><tr><th>Source</th><th>Leads</th><th>Closed</th><th>Conv.</th><th>Volume</th></tr></thead>
+            <tbody>${srcRows}</tbody></table></div>
+        </div>
+      </div>`;
+    icons();
   }
 
   // ---------- Settings ----------

@@ -212,9 +212,11 @@ const SCHEMA = `
     price         TEXT,
     closed_date   TEXT,        -- YYYY-MM-DD
     notes         TEXT,
+    source        TEXT,        -- carried over from the lead, for source ROI
     created_at    TIMESTAMPTZ DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS realtor_clients_owner ON realtor_clients (realtor_id, id);
+  ALTER TABLE realtor_clients ADD COLUMN IF NOT EXISTS source TEXT;
 
   -- A realtor's personal follow-up tasks ("Call back Tuesday"). Optionally tied
   -- to one of their own leads so the task shows in that lead's timeline.
@@ -947,10 +949,10 @@ app.post('/api/realtor/leads/:id/close', safe(async (req, res) => {
   const dealType = REALTOR_DEAL_TYPES.includes(s(b.dealType, 20)) ? s(b.dealType, 20) : '';
   const closedDate = /^\d{4}-\d{2}-\d{2}$/.test(s(b.closedDate, 10)) ? s(b.closedDate, 10) : await userToday(req.user.id);
   const row = await one(
-    `INSERT INTO realtor_clients (realtor_id, name, phone, email, intent, budget, property_type, area, deal_type, address, price, closed_date, notes, zipcode)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+    `INSERT INTO realtor_clients (realtor_id, name, phone, email, intent, budget, property_type, area, deal_type, address, price, closed_date, notes, zipcode, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
     [req.user.id, lead.name, lead.phone, lead.email, lead.intent, lead.budget, lead.property_type, lead.area,
-     dealType, s(b.address, 200), s(b.price, 60), closedDate, s(b.notes, 2000) || lead.notes || '', lead.zipcode || '']
+     dealType, s(b.address, 200), s(b.price, 60), closedDate, s(b.notes, 2000) || lead.notes || '', lead.zipcode || '', lead.source || '']
   );
   await pool.query('DELETE FROM realtor_leads WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
   res.json(realtorClientRowToJson(row));
@@ -1170,12 +1172,83 @@ app.get('/api/realtor/home', safe(async (req, res) => {
   for (const c of closed) activity.push({ icon: 'party-popper', tone: 'green', text: `You closed ${c.name} 🎉`, at: c.created_at });
   activity.sort((a, b) => new Date(b.at) - new Date(a.at));
 
+  // Today's appointments (schedule at a glance).
+  const apptRows = await q(`
+    SELECT a.*, l.name AS lead_name FROM realtor_appointments a
+    LEFT JOIN realtor_leads l ON l.id = a.lead_id
+    WHERE a.realtor_id = $1 AND a.date = $2
+    ORDER BY a.start_time NULLS FIRST, a.id`, [rid, today]);
+  const scheduleToday = apptRows.map(apptRowToJson);
+
+  // Pipeline snapshot: how many active leads sit in each stage.
+  const stageRows = await q(`SELECT coalesce(stage,'New') AS stage, count(*)::int AS n
+                             FROM realtor_leads WHERE realtor_id = $1 GROUP BY stage`, [rid]);
+  const stageMap = {}; stageRows.forEach(r => { stageMap[r.stage] = r.n; });
+  const pipeline = REALTOR_LEAD_STAGES.map(s => ({ stage: s, count: stageMap[s] || 0 }));
+
   res.json({
     realtor: { name: req.user.name, email: req.user.email },
-    stats: { activeLeads, pastClients, callsToday: fullQueue.length, tasksDue: tasksToday.length },
+    stats: { activeLeads, pastClients, callsToday: fullQueue.length, tasksDue: tasksToday.length, apptsToday: scheduleToday.length },
     queue: fullQueue.slice(0, 6),
     tasksToday,
+    scheduleToday,
+    pipeline,
     activity: activity.slice(0, 15)
+  });
+}));
+
+// ===================================================================
+// Reports
+// ===================================================================
+// Pull the first number out of a free-text price like "$525,000" → 525000.
+function parseMoney(v) {
+  const m = String(v == null ? '' : v).replace(/[, ]/g, '').match(/\d+(\.\d+)?/);
+  return m ? Number(m[0]) : 0;
+}
+app.get('/api/realtor/reports', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const rid = req.user.id;
+  const today = await userToday(rid);
+  const monthPrefix = today.slice(0, 7); // 'YYYY-MM'
+
+  // Funnel: active leads by stage, plus closed (past clients).
+  const stageRows = await q(`SELECT coalesce(stage,'New') AS stage, count(*)::int AS n
+                             FROM realtor_leads WHERE realtor_id = $1 GROUP BY stage`, [rid]);
+  const stageMap = {}; stageRows.forEach(r => { stageMap[r.stage] = r.n; });
+  const funnel = REALTOR_LEAD_STAGES.map(s => ({ stage: s, count: stageMap[s] || 0 }));
+  const activeLeads = funnel.reduce((n, s) => n + s.count, 0);
+  const closedTotal = (await one(`SELECT count(*)::int AS n FROM realtor_clients WHERE realtor_id = $1`, [rid])).n;
+
+  // This month.
+  const newLeads = (await one(`SELECT count(*)::int AS n FROM realtor_leads
+                               WHERE realtor_id = $1 AND to_char(created_at,'YYYY-MM') = $2`, [rid, monthPrefix])).n;
+  const monthClients = await q(`SELECT price FROM realtor_clients
+                                WHERE realtor_id = $1 AND coalesce(closed_date,'') LIKE $2`, [rid, monthPrefix + '%']);
+  const dealsThisMonth = monthClients.length;
+  const volumeThisMonth = monthClients.reduce((sum, c) => sum + parseMoney(c.price), 0);
+
+  // All-time volume + a simple conversion rate.
+  const allClients = await q(`SELECT price, source FROM realtor_clients WHERE realtor_id = $1`, [rid]);
+  const volumeTotal = allClients.reduce((sum, c) => sum + parseMoney(c.price), 0);
+  const conversion = (activeLeads + closedTotal) > 0 ? Math.round((closedTotal / (activeLeads + closedTotal)) * 100) : 0;
+
+  // Lead-source ROI: active leads + closed deals, grouped by source.
+  const leadSrc = await q(`SELECT coalesce(nullif(btrim(source),''),'Unknown') AS src, count(*)::int AS n
+                           FROM realtor_leads WHERE realtor_id = $1 GROUP BY src`, [rid]);
+  const srcMap = {};
+  leadSrc.forEach(r => { srcMap[r.src] = { source: r.src, leads: r.n, closed: 0 }; });
+  allClients.forEach(c => {
+    const src = String(c.source || '').trim() || 'Unknown';
+    if (!srcMap[src]) srcMap[src] = { source: src, leads: 0, closed: 0 };
+    srcMap[src].closed++;
+  });
+  const sources = Object.values(srcMap).sort((a, b) => (b.leads + b.closed) - (a.leads + a.closed));
+
+  res.json({
+    funnel, closedTotal, activeLeads,
+    month: { label: today.slice(0, 7), newLeads, deals: dealsThisMonth, volume: volumeThisMonth },
+    totals: { volume: volumeTotal, conversion },
+    sources
   });
 }));
 
