@@ -1,0 +1,132 @@
+====================================================================
+ LeadNest — Feature Overview
+ A realtor CRM. Every account manages its own leads, contacts, calls,
+ appointments, follow-ups, and past clients. All data is private to the
+ signed-in account. (Name is a placeholder.)
+====================================================================
+
+
+ACCOUNT & ACCESS
+--------------------------------------------------------------------
+- Sign up / log in    Email + password. Passwords are hashed (bcrypt);
+                      sessions are server-side cookies.
+- Dark mode           Light/dark toggle in the top bar (moon/sun icon).
+                      Remembers your choice; defaults to your device setting.
+- Change password     Under Settings.
+
+
+SECTIONS (sidebar)
+--------------------------------------------------------------------
+
+HOME  (dashboard)
+- Stat row: active leads, appointments today, follow-ups due, past clients.
+- Today's schedule: the day's appointments at a glance.
+- Pipeline snapshot: a mini bar showing how many leads sit in each stage.
+- Who to call: the top of your call queue.
+- Due today: follow-up tasks due or overdue (tick them off here).
+- Recent activity: a feed of your latest calls, new leads, and closings.
+
+PIPELINE  (kanban board)
+- Columns by stage: New -> Contacted -> Showing -> Offer -> Under Contract.
+- Drag a lead card between columns to move it through the deal.
+- Each card shows readiness, quick call/text/email actions, and budget.
+- Click a card to open the full lead.
+
+LEADS
+- Your book of business: add, edit, search, and delete leads.
+- Rich fields: contact info, intent (buying/selling/both), timeline,
+  budget, property type, area/zip, financing, credit, assets, notes,
+  stage, and source.
+- Readiness score: each lead is auto-ranked High/Medium/Low from timeline,
+  financing, credit, intent, and assets (drives the call queue).
+- Lead drawer (click a lead): full details, an activity timeline
+  (notes + logged calls), add notes, log a call, email them, edit,
+  close as won, or delete.
+- Log a call: record outcome (Connected/Voicemail/No Answer/Missed) + notes.
+- Email a lead: send a 1:1 email from a template (Intro, Check-in, New
+  listings, Thank you) via your Gmail; it's logged to the timeline.
+- Close as won: capture the deal (type, price, address, date) and move the
+  lead into Past Clients.
+- Import CSV: bulk-add leads from a spreadsheet (auto-maps common columns).
+- Intake form: a shareable public link (see LEAD CAPTURE below).
+
+PAST CLIENTS
+- Your closed deals and relationships to nurture.
+- Add directly or via "Close as won"; import from CSV.
+- Tracks deal type (Bought/Sold/Both), price, address, and close date.
+- Quick call/text/email actions; edit or delete.
+
+CONTACTS
+- A simple address book for lenders, inspectors, title, vendors, etc.
+- Name, company, phone, email, and a tag. Quick call/text/email actions.
+
+CALLS
+- Call queue: "who to call next," ranked by lead readiness. Skips anyone
+  you've already called in the last 2 days.
+- Log a call straight from the queue.
+- Call history: a running log of every call and its outcome.
+
+CALENDAR
+- Month grid of appointments: Showings, Open Houses, Closings, Calls,
+  Meetings, Other (color-coded).
+- Click a day to add; click an appointment to edit. Prev/next/today nav.
+- Appointments can link to a lead and carry a location + notes.
+- "Upcoming" list below the grid.
+
+FOLLOW-UPS  (tasks)
+- Your task list with due dates and priority (High/Medium/Low).
+- Add, complete, reopen, edit, delete. Overdue items are flagged.
+- Automatic follow-ups (optional, on by default): the app creates reminders
+  for you --
+    * Call every new lead (that has a phone).
+    * Retry after a missed call / voicemail.
+    * Nudge when a hot lead goes quiet.
+    * Check in on urgent-timeline leads.
+  Toggle this off in Settings.
+
+REPORTS
+- This month: new leads, deals closed, and closed volume.
+- Lead -> close conversion rate.
+- Pipeline funnel: a proportional view across every stage plus Closed.
+- Lead-source ROI: leads vs. closed deals per source, with conversion %,
+  so you can see which channels actually produce business.
+
+AUTO EMAILS  (weekly mailing list)
+- Build a mailing list (add addresses one at a time or paste several).
+- Write one email template (subject + message) that you can edit anytime.
+- Schedule a weekly send (pick the weekday, toggle on/off).
+- "Send to everyone now" for an immediate blast.
+- Connect Gmail: send as yourself via your own Google account. Falls back
+  to shared SMTP if configured. Recent sends are logged.
+
+SETTINGS
+- Automatic follow-ups on/off.
+- Change password.
+
+
+CROSS-CUTTING FEATURES
+--------------------------------------------------------------------
+- LEAD CAPTURE (intake form): each account gets a public /apply/<link>.
+  Share it on your site, social bio, or email signature; submissions drop
+  straight into your Leads, tagged source "Intake form." Includes spam
+  protection; you can reset the link anytime.
+- READINESS SCORING: a single scoring model powers the lead badges, the
+  call queue, and the "who to call" list on Home.
+- ACTIVITY TIMELINE: notes, logged calls, and sent emails all appear on a
+  lead's timeline in one place.
+- SEND-AS-GMAIL: connect your Google account once; both the weekly email
+  and 1:1 lead emails then send from your own address via the Gmail API.
+
+
+TECH (for reference)
+--------------------------------------------------------------------
+- Backend:  Node + Express, PostgreSQL, bcrypt, cookie sessions.
+- Frontend: static single-page app (HTML + vanilla JS + Tailwind/Lucide
+            via CDN). No build step.
+- Email:    Gmail API (per-user OAuth) or shared SMTP; weekly dispatcher
+            via an internal timer + an external cron endpoint.
+- Deploy:   any Node host with a DATABASE_URL (Render blueprint included).
+            Tables are created automatically on first start.
+
+--------------------------------------------------------------------
+See README.md for setup and running instructions.
