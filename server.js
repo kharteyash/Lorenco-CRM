@@ -31,7 +31,8 @@ const GOOGLE = {
   clientId: process.env.GOOGLE_CLIENT_ID || '',
   clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   redirectUri: process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/api/google/callback`,
-  scopes: ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.send']
+  scopes: ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.send',
+           'https://www.googleapis.com/auth/calendar.events']
 };
 const googleConfigured = () => !!(GOOGLE.clientId && GOOGLE.clientSecret);
 const oauthStates = new Map(); // state -> { userId, exp }  (CSRF + user mapping)
@@ -249,6 +250,8 @@ const SCHEMA = `
     created_at TIMESTAMPTZ DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS realtor_appts_owner ON realtor_appointments (realtor_id, date);
+  -- Links an appointment to its mirror in the user's Google Calendar.
+  ALTER TABLE realtor_appointments ADD COLUMN IF NOT EXISTS google_event_id TEXT;
 
   -- Append-only, timestamped notes on a realtor's lead (the activity timeline).
   CREATE TABLE IF NOT EXISTS realtor_lead_notes (
@@ -1304,6 +1307,9 @@ app.post('/api/realtor/appointments', safe(async (req, res) => {
     [req.user.id, leadId, f.title, f.type, f.date, f.start || null, f.end || null, f.location, f.notes]
   );
   const withName = await one(`SELECT a.*, l.name AS lead_name FROM realtor_appointments a LEFT JOIN realtor_leads l ON l.id = a.lead_id WHERE a.id = $1`, [row.id]);
+  // Mirror into the user's Google Calendar (best-effort; never blocks the save).
+  const gid = await gcalCreate(req.user.id, f, withName.lead_name);
+  if (gid) await q('UPDATE realtor_appointments SET google_event_id = $1 WHERE id = $2', [gid, row.id]);
   res.json(apptRowToJson(withName));
 }));
 
@@ -1311,7 +1317,7 @@ app.patch('/api/realtor/appointments/:id', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const cur = await one('SELECT id FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
+  const cur = await one('SELECT id, google_event_id FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
   if (!cur) return res.status(404).json({ error: 'Appointment not found.' });
   const f = cleanAppt(req.body || {});
   if (!f.title) return res.status(400).json({ error: 'A title is required.' });
@@ -1323,6 +1329,14 @@ app.patch('/api/realtor/appointments/:id', safe(async (req, res) => {
     [leadId, f.title, f.type, f.date, f.start || null, f.end || null, f.location, f.notes, id, req.user.id]
   );
   const row = await one(`SELECT a.*, l.name AS lead_name FROM realtor_appointments a LEFT JOIN realtor_leads l ON l.id = a.lead_id WHERE a.id = $1`, [id]);
+  // Keep the Google Calendar mirror in step (best-effort). An appointment
+  // created before Google was connected gets its mirror on first edit.
+  if (cur.google_event_id) {
+    await gcalUpdate(req.user.id, cur.google_event_id, f, row.lead_name);
+  } else {
+    const gid = await gcalCreate(req.user.id, f, row.lead_name);
+    if (gid) await q('UPDATE realtor_appointments SET google_event_id = $1 WHERE id = $2', [gid, id]);
+  }
   res.json(apptRowToJson(row));
 }));
 
@@ -1330,8 +1344,11 @@ app.delete('/api/realtor/appointments/:id', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const cur = await one('SELECT google_event_id FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
   const r = await pool.query('DELETE FROM realtor_appointments WHERE id = $1 AND realtor_id = $2', [id, req.user.id]);
   if (r.rowCount === 0) return res.status(404).json({ error: 'Appointment not found.' });
+  // Remove the mirror from Google Calendar too (best-effort).
+  if (cur && cur.google_event_id) await gcalDelete(req.user.id, cur.google_event_id);
   res.json({ ok: true });
 }));
 
@@ -1388,12 +1405,154 @@ async function sendViaGmail(userId, from, to, subject, body) {
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e.error && e.error.message) || 'Gmail rejected the message.'); }
 }
 
+// ----- Google Calendar sync (two-way, best-effort) -----
+// Appointments mirror into the user's primary Google Calendar; their Google
+// events show read-only on the in-app calendar. A sync failure never blocks
+// the CRM action — the appointment always saves locally first.
+const gcalTzCache = new Map(); // userId -> { tz, exp }
+async function gcalTimezone(userId, token) {
+  const hit = gcalTzCache.get(userId);
+  if (hit && hit.exp > Date.now()) return hit.tz;
+  let tz = 'America/New_York';
+  try {
+    const r = await fetch('https://www.googleapis.com/calendar/v3/users/me/settings/timezone', { headers: { Authorization: 'Bearer ' + token } });
+    if (r.ok) tz = (await r.json()).value || tz;
+  } catch (e) { /* keep the fallback */ }
+  gcalTzCache.set(userId, { tz, exp: Date.now() + 3600000 });
+  return tz;
+}
+function gcalNextDay(ymd) {
+  return new Date(new Date(ymd + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10);
+}
+function gcalAddHour(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return `${String(Math.min(h + 1, 23)).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+// Build the Google event body for one appointment. Timed appointments become
+// timed events (end defaults to start + 1h); untimed ones become all-day
+// events (Google's all-day end date is exclusive, hence the next day).
+function gcalEventBody(a, tz, leadName) {
+  const description = [a.type ? 'Type: ' + a.type : '', leadName ? 'Lead: ' + leadName : '', a.notes || '']
+    .filter(Boolean).join('\n');
+  const body = { summary: a.title, location: a.location || undefined, description: description || undefined };
+  if (a.start) {
+    const end = (a.end && a.end > a.start) ? a.end : gcalAddHour(a.start);
+    body.start = { dateTime: `${a.date}T${a.start}:00`, timeZone: tz };
+    body.end   = { dateTime: `${a.date}T${end}:00`,   timeZone: tz };
+  } else {
+    body.start = { date: a.date };
+    body.end   = { date: gcalNextDay(a.date) };
+  }
+  return body;
+}
+async function gcalCreate(userId, a, leadName) {
+  const token = await getGoogleToken(userId);
+  if (!token) return null;
+  try {
+    const tz = await gcalTimezone(userId, token);
+    const r = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(gcalEventBody(a, tz, leadName))
+    });
+    if (!r.ok) { console.error('gcal create', r.status, (await r.text().catch(() => '')).slice(0, 200)); return null; }
+    return (await r.json()).id || null;
+  } catch (e) { console.error('gcal create err', e); return null; }
+}
+async function gcalUpdate(userId, googleEventId, a, leadName) {
+  const token = await getGoogleToken(userId);
+  if (!token) return false;
+  try {
+    const tz = await gcalTimezone(userId, token);
+    const r = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events/' + encodeURIComponent(googleEventId), {
+      method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(gcalEventBody(a, tz, leadName))
+    });
+    if (!r.ok) console.error('gcal update', r.status);
+    return r.ok;
+  } catch (e) { console.error('gcal update err', e); return false; }
+}
+async function gcalDelete(userId, googleEventId) {
+  if (!googleEventId) return;
+  const token = await getGoogleToken(userId);
+  if (!token) return;
+  try {
+    await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events/' + encodeURIComponent(googleEventId), {
+      method: 'DELETE', headers: { Authorization: 'Bearer ' + token }
+    });
+  } catch (e) { console.error('gcal delete err', e); }
+}
+// Map a Google event to the app's {date, start, end} shape (its local wall-clock).
+function parseGcalTime(g) {
+  const s = g.start || {}, e = g.end || {};
+  if (s.dateTime) {
+    const sm = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(s.dateTime);
+    const em = /T(\d{2}:\d{2})/.exec(e.dateTime || '');
+    return { date: sm ? sm[1] : '', start: sm ? sm[2] : '', end: em ? em[1] : '' };
+  }
+  return { date: s.date || '', start: '', end: '' }; // all-day
+}
+
+// Pull the user's Google Calendar events for the calendar view (read-only
+// in-app), excluding mirrors of the CRM's own appointments so nothing shows
+// twice. Also reports sync status so the UI can offer connect/reconnect.
+app.get('/api/realtor/gcal', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const configured = googleConfigured();
+  const token = await getGoogleToken(req.user.id);
+  // connected = has a Google account linked; calendarOk = that grant can
+  // actually read the calendar (the calendar.events scope was accepted).
+  if (!token) return res.json({ configured, connected: false, calendarOk: false, events: [] });
+
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  const from = dateRe.test(String(req.query.from || '')) ? req.query.from : null;
+  const to = dateRe.test(String(req.query.to || '')) ? req.query.to : null;
+  const timeMin = from ? new Date(from + 'T00:00:00Z').getTime() - 86400000 : Date.now() - 60 * 86400000;
+  const timeMax = to ? new Date(to + 'T00:00:00Z').getTime() + 2 * 86400000 : Date.now() + 180 * 86400000;
+
+  const mine = await q('SELECT google_event_id FROM realtor_appointments WHERE realtor_id = $1 AND google_event_id IS NOT NULL', [req.user.id]);
+  const mirrored = new Set(mine.map(r => r.google_event_id));
+
+  const url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?' + new URLSearchParams({
+    timeMin: new Date(timeMin).toISOString(), timeMax: new Date(timeMax).toISOString(),
+    singleEvents: 'true', orderBy: 'startTime', maxResults: '250'
+  });
+  let items = [];
+  try {
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) {
+      // 403 = the calendar scope wasn't granted (older connection) OR the
+      // Google Calendar API isn't enabled for the OAuth project.
+      return res.json({
+        configured, connected: true, calendarOk: false, events: [],
+        reason: r.status === 403 ? 'needs_reconnect' : 'gcal_' + r.status
+      });
+    }
+    items = (await r.json()).items || [];
+  } catch (e) {
+    return res.json({ configured, connected: true, calendarOk: false, events: [], reason: 'fetch_failed' });
+  }
+
+  const events = items
+    .filter(g => g.status !== 'cancelled' && !mirrored.has(g.id))
+    .map(g => {
+      const t = parseGcalTime(g);
+      if (!t.date) return null;
+      const meetLink = g.hangoutLink ||
+        (((g.conferenceData && g.conferenceData.entryPoints) || []).find(p => p.entryPointType === 'video') || {}).uri || null;
+      return { gid: g.id, date: t.date, start: t.start, end: t.end, title: g.summary || '(no title)', location: g.location || '', meetLink, source: 'google' };
+    })
+    .filter(Boolean);
+  res.json({ configured, connected: true, calendarOk: true, events });
+}));
+
 // Start the OAuth flow — redirect the user to Google's consent screen.
 app.get('/api/google/connect', safe(async (req, res) => {
   if (!req.user) return res.status(401).send('Sign in first.');
   if (!googleConfigured()) return res.status(400).send('Google sign-in is not configured on this server.');
   const state = crypto.randomBytes(16).toString('hex');
-  oauthStates.set(state, { userId: req.user.id, exp: Date.now() + 10 * 60 * 1000 });
+  // Remember where the user connected from so the callback can bounce back there.
+  const from = String(req.query.from || '') === 'calendar' ? 'calendar' : 'emails';
+  oauthStates.set(state, { userId: req.user.id, exp: Date.now() + 10 * 60 * 1000, from });
   const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
     client_id: GOOGLE.clientId, redirect_uri: GOOGLE.redirectUri, response_type: 'code',
     scope: GOOGLE.scopes.join(' '), access_type: 'offline', prompt: 'consent',
@@ -1412,8 +1571,9 @@ app.get('/api/google/callback', safe(async (req, res) => {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ code, client_id: GOOGLE.clientId, client_secret: GOOGLE.clientSecret, redirect_uri: GOOGLE.redirectUri, grant_type: 'authorization_code' })
   });
+  const dest = st.from === 'calendar' ? 'calendar' : 'emails';
   const tok = await r.json();
-  if (!r.ok) { console.error('Google token exchange failed:', tok); return res.redirect('/?gmail=error#emails'); }
+  if (!r.ok) { console.error('Google token exchange failed:', tok); return res.redirect('/?gmail=error#' + dest); }
   const expiresAt = Date.now() + (tok.expires_in || 3600) * 1000;
   // Get the connected address.
   let email = '';
@@ -1422,7 +1582,7 @@ app.get('/api/google/callback', safe(async (req, res) => {
     if (ui.ok) email = (await ui.json()).email || '';
   } catch (e) { /* non-fatal */ }
   await saveGoogleTokens(st.userId, email, tok.access_token, tok.refresh_token, expiresAt);
-  res.redirect('/?gmail=connected#emails');
+  res.redirect('/?gmail=connected#' + dest);
 }));
 
 app.post('/api/google/disconnect', safe(async (req, res) => {

@@ -67,11 +67,19 @@ CALLS
 - Call history: a running log of every call and its outcome.
 
 CALENDAR
-- Month grid of appointments: Showings, Open Houses, Closings, Calls,
-  Meetings, Other (color-coded).
-- Click a day to add; click an appointment to edit. Prev/next/today nav.
+- Month, Week, and Day views (Google Calendar style) of your appointments:
+  Showings, Open Houses, Closings, Calls, Meetings, Other (color-coded).
+- Follow-up tasks appear on their due date as all-day items; click one to
+  jump to Follow-ups.
+- Google Calendar sync (two-way): connect your Google account and every
+  appointment you add / edit / delete here is mirrored into your Google
+  Calendar; events from your Google Calendar show on the in-app calendar
+  (read-only), including one-click Google Meet "Join" links.
+- Click a day (or an hour slot in Week/Day view) to add; click an
+  appointment to edit. Prev/next/today nav; "+N more" opens that day.
+- A "now" line marks the current time in Week/Day view.
 - Appointments can link to a lead and carry a location + notes.
-- "Upcoming" list below the grid.
+- "Upcoming" list below the month grid.
 
 FOLLOW-UPS  (tasks)
 - Your task list with due dates and priority (High/Medium/Low).
@@ -114,8 +122,11 @@ CROSS-CUTTING FEATURES
   call queue, and the "who to call" list on Home.
 - ACTIVITY TIMELINE: notes, logged calls, and sent emails all appear on a
   lead's timeline in one place.
-- SEND-AS-GMAIL: connect your Google account once; both the weekly email
-  and 1:1 lead emails then send from your own address via the Gmail API.
+- CONNECT GOOGLE: connect your Google account once; the weekly email and
+  1:1 lead emails send from your own address via the Gmail API, and the
+  calendar syncs two-way with your Google Calendar. (Accounts connected
+  before calendar sync existed just reconnect once to grant the extra
+  calendar permission.)
 
 
 TECH (for reference)

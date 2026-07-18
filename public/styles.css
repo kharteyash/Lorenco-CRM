@@ -288,7 +288,31 @@ textarea.input { resize: vertical; min-height: 72px; }
 :root[data-theme="dark"] .cal-chip.purple{background:#241638;color:#C4A2FF;}
 :root[data-theme="dark"] .cal-chip.green{background:#12301F;color:#5FD996;}
 :root[data-theme="dark"] .cal-chip.amber{background:#33260C;color:#E6B85A;}
-.cal-more { font-size: 10px; color: var(--muted); padding-left: 4px; }
+.cal-more { font-size: 10px; color: var(--muted); padding-left: 4px; cursor: pointer; }
+.cal-more:hover { color: var(--accent); }
+
+/* Calendar — extra chip flavors: read-only Google events + follow-up tasks */
+.cal-chip { cursor: pointer; }
+.cal-chip.google { background: var(--surface); color: var(--muted); border: 1px dashed var(--border-strong); }
+.cal-chip.google:hover { border-color: var(--accent); color: var(--accent); }
+.cal-chip.task { display: flex; align-items: center; gap: 4px; background: var(--surface-3); color: var(--muted); }
+.cal-chip.task i, .cal-chip.task svg { width: 10px; height: 10px; flex-shrink: 0; }
+
+/* Calendar — week & day time grids */
+.cal-tabs { display: flex; gap: 2px; background: var(--surface-3); border-radius: 9px; padding: 3px; }
+.cal-tab { padding: 5px 13px; font-size: 12px; font-weight: 600; border-radius: 7px; color: var(--muted); cursor: pointer; user-select: none; }
+.cal-tab.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(20,22,45,.12); }
+.cal-wk { min-width: 720px; }
+.cal-wk-row { display: grid; grid-template-columns: 64px repeat(7, 1fr); border-top: 1px solid var(--border); min-height: 52px; }
+.cal-wk-time { text-align: right; padding: 4px 8px 0 0; font-size: 11px; color: var(--muted); }
+.cal-wk-cell { border-left: 1px solid var(--border); padding: 2px; position: relative; cursor: pointer; min-width: 0; }
+.cal-wk-cell:hover { background: var(--surface-2); }
+.cal-wk-cell.today { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.cal-wk-num { font-size: 15px; font-weight: 600; width: 28px; height: 28px; border-radius: 999px; display: flex; align-items: center; justify-content: center; margin: 2px auto 0; }
+.cal-wk-num.today { background: var(--accent); color: #fff; font-weight: 800; }
+.cal-block { white-space: normal; padding: 4px 7px; border-radius: 7px; margin-bottom: 2px; }
+.cal-nowline { position: absolute; left: 0; right: 0; height: 2px; background: #E5484D; z-index: 2; pointer-events: none; }
+.cal-nowline::before { content: ''; position: absolute; left: -1px; top: -3px; width: 8px; height: 8px; border-radius: 999px; background: #E5484D; }
 @media (max-width: 640px) {
   .cal-cell { min-height: 62px; }
   .cal-chip { font-size: 9px; }

@@ -777,45 +777,187 @@
     let [h, m] = t.split(':').map(Number); const ap = h < 12 ? 'am' : 'pm'; h = h % 12 || 12;
     return m ? `${h}:${pad2(m)}${ap}` : `${h}${ap}`;
   }
-  let calY, calM; // visible month
+  // Google-Calendar-style views. The cursor date anchors the visible range;
+  // follow-up tasks show as all-day items on their due date; events from the
+  // connected Google Calendar merge in read-only (mirrors of our own
+  // appointments are excluded server-side so nothing shows twice).
+  let calView = ['month', 'week', 'day'].includes(localStorage.getItem('ln-calview')) ? localStorage.getItem('ln-calview') : 'month';
+  let calCursor = null; // Date, local midnight
+  const CAL_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dstr = (d) => ymd(d.getFullYear(), d.getMonth(), d.getDate());
+  const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const calAddDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const startOfWeek = (d) => calAddDays(d, -d.getDay()); // Sunday
+  const taskColor = (p) => p === 'High' ? '#C94747' : p === 'Medium' ? '#B07A00' : '#8A8AA0';
+  // Hour rows: a default 8am–6pm window, expanded to fit any timed event.
+  function calHours(list) {
+    let min = 8, max = 18;
+    list.forEach(e => { if (e.start) { const h = +e.start.slice(0, 2); if (h < min) min = h; if (h > max) max = h; } });
+    const out = []; for (let h = min; h <= max; h++) out.push(h); return out;
+  }
+
   async function renderCalendar() {
     const today = new Date();
-    if (calY == null) { calY = today.getFullYear(); calM = today.getMonth(); }
-    const first = new Date(calY, calM, 1);
-    const startDay = first.getDay();
-    const daysIn = new Date(calY, calM + 1, 0).getDate();
-    const from = ymd(calY, calM, 1), to = ymd(calY, calM, daysIn);
-    let appts = [];
-    try { appts = await api(`/api/realtor/appointments?from=${from}&to=${to}`); } catch (e) { return errView(e); }
-    const byDay = {}; appts.forEach(a => (byDay[a.date] = byDay[a.date] || []).push(a));
-    const todayStr = ymd(today.getFullYear(), today.getMonth(), today.getDate());
+    const todayStr = dstr(today);
+    if (!calCursor) calCursor = parseYmd(todayStr);
 
-    const cells = [];
-    for (let i = 0; i < startDay; i++) cells.push(`<div class="cal-cell empty"></div>`);
-    for (let d = 1; d <= daysIn; d++) {
-      const ds = ymd(calY, calM, d);
-      const items = byDay[ds] || [];
-      const chips = items.slice(0, 3).map(a => `<div class="cal-chip ${apptTone(a.type)}" data-appt="${a.id}" title="${escA(a.title)}">${a.start ? `<b>${fmtTime(a.start)}</b> ` : ''}${esc(a.title)}</div>`).join('');
-      const more = items.length > 3 ? `<div class="cal-more">+${items.length - 3} more</div>` : '';
-      cells.push(`<div class="cal-cell ${ds === todayStr ? 'today' : ''}" data-day="${ds}">
-        <div class="cal-daynum">${d}</div>${chips}${more}</div>`);
+    // One-time toast after returning from the Google consent screen.
+    const gp = new URLSearchParams(location.search).get('gmail');
+    if (gp) {
+      history.replaceState(null, '', location.pathname + location.hash);
+      toast(gp === 'connected' ? 'Google account connected' : 'Google connect failed', gp === 'connected' ? 'check-circle-2' : 'alert-triangle');
     }
-    while (cells.length % 7 !== 0) cells.push(`<div class="cal-cell empty"></div>`);
+
+    // Visible range for the current view.
+    let from, to;
+    if (calView === 'month') {
+      from = ymd(calCursor.getFullYear(), calCursor.getMonth(), 1);
+      to = ymd(calCursor.getFullYear(), calCursor.getMonth(), new Date(calCursor.getFullYear(), calCursor.getMonth() + 1, 0).getDate());
+    } else if (calView === 'week') {
+      const s = startOfWeek(calCursor);
+      from = dstr(s); to = dstr(calAddDays(s, 6));
+    } else { from = to = dstr(calCursor); }
+
+    let appts = [], tasks = [], g = null;
+    try {
+      [appts, tasks, g] = await Promise.all([
+        api(`/api/realtor/appointments?from=${from}&to=${to}`),
+        api('/api/realtor/tasks'),
+        api(`/api/realtor/gcal?from=${from}&to=${to}`).catch(() => null)
+      ]);
+    } catch (e) { return errView(e); }
+    const gEvents = (g && g.events) || [];
+    // One merged, per-day-sortable list; all-day items first, then by time.
+    const events = appts.map(a => Object.assign({ source: 'crm' }, a)).concat(gEvents);
+    const eventsOn = (ds) => events.filter(e => e.date === ds)
+      .sort((a, b) => (a.start || '') === (b.start || '') ? 0 : !a.start ? -1 : !b.start ? 1 : a.start < b.start ? -1 : 1);
+    const tasksOn = (ds) => tasks.filter(t => t.status === 'todo' && t.due === ds);
+
+    // ----- Small renderers -----
+    const gi = (e) => events.indexOf(e); // stable index for click lookup
+    function evChip(e) { // compact chip (month cells, week grid)
+      const time = e.start ? `<b>${fmtTime(e.start)}</b> ` : '';
+      if (e.source === 'google') {
+        return `<div class="cal-chip google" data-gev="${gi(e)}" title="${escA(e.title)}${e.meetLink ? ' — Google Meet' : ' — from Google Calendar'}">${time}${esc(e.title)}${e.meetLink ? ' ·&nbsp;Join' : ''}</div>`;
+      }
+      return `<div class="cal-chip ${apptTone(e.type)}" data-appt="${e.id}" title="${escA(e.title)}">${time}${esc(e.title)}</div>`;
+    }
+    function evBlock(e) { // full-size block (day view)
+      const sub = [e.start ? fmtTime(e.start) + (e.end ? ' – ' + fmtTime(e.end) : '') : 'All day',
+                   e.source === 'google' ? 'Google Calendar' : e.type, e.leadName, e.location].filter(Boolean).join(' · ');
+      const attrs = e.source === 'google' ? `data-gev="${gi(e)}"` : `data-appt="${e.id}"`;
+      return `<div class="cal-chip cal-block ${e.source === 'google' ? 'google' : apptTone(e.type)}" ${attrs} title="${escA(e.title)}">
+        <div class="font-semibold" style="font-size:12.5px">${esc(e.title)}${e.meetLink ? ' · Join' : ''}</div>
+        <div style="font-size:11px;opacity:.85">${esc(sub)}</div></div>`;
+    }
+    const taskChip = (t) => `<div class="cal-chip task" data-task="1" style="border-left:3px solid ${taskColor(t.priority)}" title="${escA(t.title)} — ${t.priority} (open Follow-ups)"><i data-lucide="check-square"></i>${esc(t.title)}</div>`;
+    // The red "now" line, placed inside the current hour's cell for today.
+    const nowLine = (ds, h) => (ds === todayStr && today.getHours() === h)
+      ? `<div class="cal-nowline" style="top:${Math.round(today.getMinutes() / 60 * 100)}%"></div>` : '';
+
+    // ----- Views -----
+    function monthBody() {
+      const y = calCursor.getFullYear(), m = calCursor.getMonth();
+      const startDay = new Date(y, m, 1).getDay();
+      const daysIn = new Date(y, m + 1, 0).getDate();
+      const cells = [];
+      for (let i = 0; i < startDay; i++) cells.push(`<div class="cal-cell empty"></div>`);
+      for (let d = 1; d <= daysIn; d++) {
+        const ds = ymd(y, m, d);
+        const items = tasksOn(ds).map(taskChip).concat(eventsOn(ds).map(evChip));
+        const more = items.length > 3 ? `<div class="cal-more" data-more="${ds}">+${items.length - 3} more</div>` : '';
+        cells.push(`<div class="cal-cell ${ds === todayStr ? 'today' : ''}" data-day="${ds}">
+          <div class="cal-daynum">${d}</div>${items.slice(0, 3).join('')}${more}</div>`);
+      }
+      while (cells.length % 7 !== 0) cells.push(`<div class="cal-cell empty"></div>`);
+      return `<div class="cal-grid cal-head">${CAL_DOW.map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
+        <div class="cal-grid">${cells.join('')}</div>`;
+    }
+
+    function weekBody() {
+      const days = Array.from({ length: 7 }, (_, i) => calAddDays(startOfWeek(calCursor), i));
+      const keys = days.map(dstr);
+      const timed = keys.flatMap(ds => eventsOn(ds).filter(e => e.start));
+      const header = `<div class="cal-wk-row" style="border-top:none;min-height:0">
+        <div></div>${days.map((d, i) => `
+          <div class="text-center py-1.5" style="border-left:1px solid var(--border)">
+            <div class="cal-dow" style="padding:0">${CAL_DOW[d.getDay()]}</div>
+            <div class="cal-wk-num ${keys[i] === todayStr ? 'today' : ''}">${d.getDate()}</div>
+          </div>`).join('')}</div>`;
+      const allDayItems = (ds) => tasksOn(ds).map(taskChip).concat(eventsOn(ds).filter(e => !e.start).map(evChip));
+      const anyAllDay = keys.some(ds => allDayItems(ds).length);
+      const allDayRow = anyAllDay ? `<div class="cal-wk-row" style="min-height:0;background:var(--surface-2)">
+        <div class="cal-wk-time" style="font-size:10px">all-day</div>
+        ${keys.map(ds => `<div class="cal-wk-cell" data-slot="${ds}">${allDayItems(ds).join('')}</div>`).join('')}</div>` : '';
+      const rows = calHours(timed).map(h => `<div class="cal-wk-row">
+        <div class="cal-wk-time">${fmtTime(pad2(h) + ':00')}</div>
+        ${keys.map(ds => `<div class="cal-wk-cell ${ds === todayStr ? 'today' : ''}" data-slot="${ds}" data-hour="${h}">
+          ${nowLine(ds, h)}${eventsOn(ds).filter(e => e.start && +e.start.slice(0, 2) === h).map(evChip).join('')}</div>`).join('')}</div>`).join('');
+      return `<div style="overflow-x:auto"><div class="cal-wk">${header}${allDayRow}${rows}</div></div>`;
+    }
+
+    function dayBody() {
+      const ds = dstr(calCursor);
+      const dayTasks = tasksOn(ds);
+      const allDay = eventsOn(ds).filter(e => !e.start);
+      const timed = eventsOn(ds).filter(e => e.start);
+      const top = (dayTasks.length || allDay.length) ? `<div class="mb-3 flex flex-col gap-1.5">
+        ${dayTasks.map(taskChip).join('')}${allDay.map(evBlock).join('')}</div>` : '';
+      const rows = calHours(timed).map(h => `<div class="cal-wk-row" style="grid-template-columns:64px 1fr">
+        <div class="cal-wk-time">${fmtTime(pad2(h) + ':00')}</div>
+        <div class="cal-wk-cell" data-slot="${ds}" data-hour="${h}">
+          ${nowLine(ds, h)}${timed.filter(e => +e.start.slice(0, 2) === h).map(evBlock).join('')}</div></div>`).join('');
+      return `${top}<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">${rows}</div>`;
+    }
+
+    // ----- Toolbar label -----
+    let label;
+    if (calView === 'month') label = calCursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    else if (calView === 'day') label = calCursor.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    else {
+      const a = startOfWeek(calCursor), b = calAddDays(a, 6);
+      const left = a.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const right = a.getMonth() === b.getMonth()
+        ? `${b.getDate()}, ${b.getFullYear()}`
+        : b.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      label = `${left} – ${right}`;
+    }
+
+    // ----- Sync banner -----
+    let banner = '';
+    if (g && g.configured !== false) {
+      if (g.calendarOk) {
+        banner = `<div class="text-[12px] text-muted flex items-center gap-1.5 mb-3">
+          <i data-lucide="check-circle-2" style="width:14px;height:14px;color:#1B7F4B"></i>
+          Synced with Google Calendar — appointments appear in both places.</div>`;
+      } else {
+        const reconnect = g.connected && !g.calendarOk;
+        const msg = reconnect
+          ? 'Calendar access isn’t granted yet — reconnect Google to sync (and make sure the Google Calendar API is enabled).'
+          : 'Connect your Google account to sync this calendar with Google Calendar.';
+        banner = `<div class="panel mb-4 flex items-center justify-between gap-3 flex-wrap" style="padding:13px 16px;border-left:3px solid #B07A00">
+          <div class="flex items-center gap-2 text-[13px]"><i data-lucide="calendar-clock" style="width:16px;height:16px;color:#B07A00;flex-shrink:0"></i><span>${msg}</span></div>
+          <button class="btn-primary" id="cal-connect" style="white-space:nowrap"><i data-lucide="calendar"></i>${reconnect ? 'Reconnect Google' : 'Connect Google'}</button></div>`;
+      }
+    }
 
     const upcoming = appts.filter(a => a.date >= todayStr).slice(0, 6);
     $('view').innerHTML = `
-      ${pageHead('Calendar', 'Showings, open houses, closings — your week at a glance.', `<button class="btn-primary" id="cal-add"><i data-lucide="plus"></i>New appointment</button>`)}
+      ${pageHead('Calendar', 'Appointments, follow-ups due, and your Google Calendar — in one place.', `<button class="btn-primary" id="cal-add"><i data-lucide="plus"></i>New appointment</button>`)}
+      ${banner}
       <div class="panel p-4">
-        <div class="flex items-center gap-2 mb-3">
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
           <button class="icon-btn" id="cal-prev"><i data-lucide="chevron-left"></i></button>
-          <div class="text-[15px] font-bold" style="min-width:150px;text-align:center">${first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</div>
+          <div class="text-[15px] font-bold" style="min-width:150px;text-align:center">${label}</div>
           <button class="icon-btn" id="cal-next"><i data-lucide="chevron-right"></i></button>
           <button class="btn-ghost" id="cal-today" style="margin-left:6px">Today</button>
+          <div class="cal-tabs" style="margin-left:auto">
+            ${['month', 'week', 'day'].map(v => `<div class="cal-tab ${calView === v ? 'active' : ''}" data-calview="${v}">${v[0].toUpperCase() + v.slice(1)}</div>`).join('')}
+          </div>
         </div>
-        <div class="cal-grid cal-head">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
-        <div class="cal-grid">${cells.join('')}</div>
+        ${calView === 'month' ? monthBody() : calView === 'week' ? weekBody() : dayBody()}
       </div>
-      ${upcoming.length ? `<div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Upcoming</h3>
+      ${calView === 'month' && upcoming.length ? `<div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Upcoming</h3>
         ${upcoming.map(a => `<div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0" data-appt="${a.id}" style="cursor:pointer">
           <div class="stat-icon badge ${apptTone(a.type)}" style="width:34px;height:34px;border-radius:9px;flex-direction:column"><i data-lucide="calendar" style="width:15px;height:15px"></i></div>
           <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(a.title)}</div>
@@ -823,17 +965,57 @@
           <div class="text-[12px] text-muted text-right" style="flex-shrink:0">${fmtDate(a.date)}${a.start ? '<br>' + fmtTime(a.start) : ''}</div>
         </div>`).join('')}</div>` : ''}`;
     icons();
-    $('cal-add').addEventListener('click', () => apptModal(null, todayStr));
-    $('cal-prev').addEventListener('click', () => { calM--; if (calM < 0) { calM = 11; calY--; } renderCalendar(); });
-    $('cal-next').addEventListener('click', () => { calM++; if (calM > 11) { calM = 0; calY++; } renderCalendar(); });
-    $('cal-today').addEventListener('click', () => { calY = today.getFullYear(); calM = today.getMonth(); renderCalendar(); });
-    $('view').querySelectorAll('[data-day]').forEach(c => c.addEventListener('click', (e) => { if (e.target.closest('[data-appt]')) return; apptModal(null, c.dataset.day); }));
-    $('view').querySelectorAll('[data-appt]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); const a = appts.find(x => x.id == el.dataset.appt); if (a) apptModal(a, a.date); }));
+
+    // ----- Bindings -----
+    const step = calView === 'day' ? 1 : 7;
+    $('cal-add').addEventListener('click', () => apptModal(null, dstr(calCursor) >= todayStr ? dstr(calCursor) : todayStr));
+    $('cal-prev').addEventListener('click', () => {
+      if (calView === 'month') calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() - 1, 1);
+      else calCursor = calAddDays(calCursor, -step);
+      renderCalendar();
+    });
+    $('cal-next').addEventListener('click', () => {
+      if (calView === 'month') calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() + 1, 1);
+      else calCursor = calAddDays(calCursor, step);
+      renderCalendar();
+    });
+    $('cal-today').addEventListener('click', () => { calCursor = parseYmd(todayStr); renderCalendar(); });
+    $('view').querySelectorAll('[data-calview]').forEach(t => t.addEventListener('click', () => {
+      calView = t.dataset.calview; localStorage.setItem('ln-calview', calView); renderCalendar();
+    }));
+    const connectBtn = $('cal-connect');
+    if (connectBtn) connectBtn.addEventListener('click', () => { location.href = '/api/google/connect?from=calendar'; });
+
+    // Clicks: an empty day/slot adds an appointment there; chips open their thing.
+    $('view').querySelectorAll('[data-day]').forEach(c => c.addEventListener('click', (e) => {
+      if (e.target.closest('[data-appt],[data-gev],[data-task],[data-more]')) return;
+      apptModal(null, c.dataset.day);
+    }));
+    $('view').querySelectorAll('[data-slot]').forEach(c => c.addEventListener('click', (e) => {
+      if (e.target.closest('[data-appt],[data-gev],[data-task]')) return;
+      apptModal(null, c.dataset.slot, c.dataset.hour ? pad2(c.dataset.hour) + ':00' : '');
+    }));
+    $('view').querySelectorAll('[data-appt]').forEach(el => el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const a = appts.find(x => x.id == el.dataset.appt);
+      if (a) apptModal(a, a.date);
+    }));
+    $('view').querySelectorAll('[data-gev]').forEach(el => el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ev = events[+el.dataset.gev];
+      if (ev && ev.meetLink) window.open(ev.meetLink, '_blank', 'noopener');
+    }));
+    $('view').querySelectorAll('[data-task]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); location.hash = 'tasks'; }));
+    $('view').querySelectorAll('[data-more]').forEach(el => el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      calCursor = parseYmd(el.dataset.more); calView = 'day'; localStorage.setItem('ln-calview', 'day');
+      renderCalendar();
+    }));
   }
-  async function apptModal(appt, presetDate) {
+  async function apptModal(appt, presetDate, presetStart) {
     let leads = leadCache;
     if (!leads.length) { try { leads = await api('/api/realtor/leads'); } catch (e) {} }
-    const a = appt || {};
+    const a = appt || { start: presetStart || '' };
     openModal(appt ? 'Edit appointment' : 'New appointment', `
       <div class="grid-form">
         <div class="field full"><label class="lbl">Title *</label><input class="input" data-f="title" value="${escA(a.title)}" placeholder="Showing at 123 Main St"></div>
