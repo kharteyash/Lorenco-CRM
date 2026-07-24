@@ -154,6 +154,8 @@
   function route() {
     const id = (location.hash || '#home').slice(1);
     active = SECTIONS.find(s => s.id === id) ? id : 'home';
+    // Cosmetic: each section has its own accent color (see styles.css).
+    document.documentElement.setAttribute('data-section', active);
     $('topbar-title').textContent = (SECTIONS.find(s => s.id === active) || {}).label || '';
     renderShell();
     render();
@@ -166,9 +168,11 @@
     (fn || renderHome)();
   }
 
+  // Title is trusted HTML (every call site passes a literal; dynamic bits are
+  // esc()'d by the caller) so headings can carry styled spans like the wave.
   function pageHead(title, sub, actionsHtml) {
     return `<div class="flex items-start justify-between gap-3 mb-5 flex-wrap">
-      <div><h1 class="text-[22px] font-bold tracking-tight">${esc(title)}</h1>
+      <div><h1 class="text-[22px] font-bold tracking-tight">${title}</h1>
       <p class="text-[13px] text-muted mt-0.5">${esc(sub)}</p></div>
       <div class="flex items-center gap-2">${actionsHtml || ''}</div></div>`;
   }
@@ -185,6 +189,10 @@
   }
 
   // ---------- Home ----------
+  function greeting() {
+    const h = new Date().getHours();
+    return h < 5 ? 'Burning the midnight oil' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  }
   async function renderHome() {
     let d;
     try { d = await api('/api/realtor/home'); } catch (e) { return errView(e); }
@@ -233,7 +241,7 @@
     }).join('')}</div>`;
 
     $('view').innerHTML = `
-      ${pageHead('Hi ' + (me.name.split(/\s+/)[0]) + ' 👋', "Here's what needs your attention today.", `<a class="btn-primary" href="#leads" onclick="event.preventDefault();location.hash='leads'"><i data-lucide="plus"></i>Add a lead</a>`)}
+      ${pageHead(greeting() + ', ' + esc(me.name.split(/\s+/)[0]) + ' <span class="emoji">👋</span>', "Here's what needs your attention today.", `<a class="btn-primary" href="#leads" onclick="event.preventDefault();location.hash='leads'"><i data-lucide="plus"></i>Add a lead</a>`)}
       <div class="grid-stats mb-6">
         ${stat('users', 'blue', d.stats.activeLeads, 'Active leads')}
         ${stat('calendar-clock', 'purple', d.stats.apptsToday || 0, 'Appointments today')}

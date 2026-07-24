@@ -6,15 +6,20 @@
   <title>LeadNest</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
+  <!-- Ambient background wash (pure decoration) -->
+  <div class="bg-blobs" aria-hidden="true"></div>
   <!-- Auth screen -->
   <div id="auth-screen" class="hidden min-h-screen flex items-center justify-center p-5">
     <div class="w-full max-w-[400px]">
       <div class="flex items-center justify-center gap-2 mb-6">
         <div class="brand-mark"><i data-lucide="home"></i></div>
-        <span class="text-[22px] font-extrabold tracking-tight">LeadNest</span>
+        <span class="text-[22px] font-extrabold tracking-tight brand-text">LeadNest</span>
       </div>
       <div class="panel p-7">
         <h1 id="auth-title" class="text-[19px] font-bold mb-1">Welcome back</h1>
@@ -40,6 +45,7 @@
           <a id="auth-switch" href="#" class="font-semibold text-[var(--accent)]">Create an account</a>
         </div>
       </div>
+      <p class="text-center text-[12px] text-muted mt-5">Your leads, your calendar, your week — all in one nest. 🪺</p>
     </div>
   </div>
 
@@ -49,7 +55,7 @@
       <aside class="sidebar">
         <div class="flex items-center gap-2 px-4 h-16 border-b border-[var(--border)]">
           <div class="brand-mark sm"><i data-lucide="home"></i></div>
-          <span class="text-[16px] font-extrabold tracking-tight">LeadNest</span>
+          <span class="text-[16px] font-extrabold tracking-tight brand-text">LeadNest</span>
         </div>
         <nav id="nav" class="p-3 flex flex-col gap-1"></nav>
         <div class="mt-auto p-3 border-t border-[var(--border)]">
