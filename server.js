@@ -796,6 +796,21 @@ async function sendSingleEmail(userId, to, subject, body) {
   throw new Error('Connect Gmail (or configure SMTP) to send email.');
 }
 
+// Email anyone (a contact, past client, or ad-hoc address) through the user's
+// connected Gmail / SMTP. Leads have their own route below that also logs the
+// send to the lead's timeline.
+app.post('/api/realtor/email', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const to = String((req.body || {}).to || '').trim().slice(0, 160);
+  const subject = String((req.body || {}).subject || '').trim().slice(0, 200);
+  const body = String((req.body || {}).body || '').trim().slice(0, 10000);
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return res.status(400).json({ error: 'That email address doesn’t look valid.' });
+  if (!subject) return res.status(400).json({ error: 'A subject is required.' });
+  if (!body) return res.status(400).json({ error: 'The message is empty.' });
+  const via = await sendSingleEmail(req.user.id, to, subject, body);
+  res.json({ ok: true, via });
+}));
+
 // Email one lead directly; records it on the lead's timeline.
 app.post('/api/realtor/leads/:id/email', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
@@ -1545,13 +1560,20 @@ app.get('/api/realtor/gcal', safe(async (req, res) => {
   res.json({ configured, connected: true, calendarOk: true, events });
 }));
 
+// Which Google account is connected (for "sending as ..." hints in the UI).
+app.get('/api/google/status', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  res.json(await googleStatus(req.user.id));
+}));
+
 // Start the OAuth flow — redirect the user to Google's consent screen.
 app.get('/api/google/connect', safe(async (req, res) => {
   if (!req.user) return res.status(401).send('Sign in first.');
   if (!googleConfigured()) return res.status(400).send('Google sign-in is not configured on this server.');
   const state = crypto.randomBytes(16).toString('hex');
   // Remember where the user connected from so the callback can bounce back there.
-  const from = String(req.query.from || '') === 'calendar' ? 'calendar' : 'emails';
+  const FROMS = ['emails', 'calendar', 'leads', 'pipeline', 'contacts', 'clients'];
+  const from = FROMS.includes(String(req.query.from || '')) ? String(req.query.from) : 'emails';
   oauthStates.set(state, { userId: req.user.id, exp: Date.now() + 10 * 60 * 1000, from });
   const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
     client_id: GOOGLE.clientId, redirect_uri: GOOGLE.redirectUri, response_type: 'code',
@@ -1571,7 +1593,7 @@ app.get('/api/google/callback', safe(async (req, res) => {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ code, client_id: GOOGLE.clientId, client_secret: GOOGLE.clientSecret, redirect_uri: GOOGLE.redirectUri, grant_type: 'authorization_code' })
   });
-  const dest = st.from === 'calendar' ? 'calendar' : 'emails';
+  const dest = st.from || 'emails';
   const tok = await r.json();
   if (!r.ok) { console.error('Google token exchange failed:', tok); return res.redirect('/?gmail=error#' + dest); }
   const expiresAt = Date.now() + (tok.expires_in || 3600) * 1000;

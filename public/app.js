@@ -31,7 +31,6 @@
   }
   const telLink = (p) => { const n = normPhone(p); return n ? 'tel:' + n : ''; };
   const smsLink = (p) => { const n = normPhone(p); return n ? 'sms:' + n : ''; };
-  const mailLink = (e) => e ? 'mailto:' + e : '';
   function fmtDate(s) {
     if (!s) return '';
     const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(s) ? s + 'T00:00:00' : s);
@@ -180,11 +179,16 @@
     return `<div class="empty"><i data-lucide="${icon}"></i><div class="text-[14px] font-semibold mt-3">${esc(title)}</div>
       <div class="text-[13px] text-muted mt-1">${esc(sub)}</div></div>`;
   }
-  function contactActions(name, phone, email) {
+  // The envelope opens the in-app compose (sends via connected Gmail) instead
+  // of a mailto: link, which would hand off to Outlook or whatever the OS has.
+  function composeBtn(name, email, leadId) {
+    return `<button class="act" data-compose="${escA(email)}" data-compose-name="${escA(name)}"${leadId ? ` data-compose-lead="${leadId}"` : ''} title="Email via Gmail"><i data-lucide="mail"></i></button>`;
+  }
+  function contactActions(name, phone, email, leadId) {
     const a = [];
     if (phone) a.push(`<a class="act" href="${telLink(phone)}" title="Call"><i data-lucide="phone"></i></a>`);
     if (phone) a.push(`<a class="act" href="${smsLink(phone)}" title="Text"><i data-lucide="message-square"></i></a>`);
-    if (email) a.push(`<a class="act" href="${mailLink(email)}" title="Email"><i data-lucide="mail"></i></a>`);
+    if (email) a.push(composeBtn(name, email, leadId));
     return `<div class="flex items-center gap-1.5">${a.join('') || '<span class="text-muted text-[12px]">—</span>'}</div>`;
   }
 
@@ -300,7 +304,7 @@
         <div class="text-[11.5px] text-muted mt-1 truncate">${esc([l.timeline, l.area].filter(Boolean).join(' · ')) || 'No details yet'}</div>
         <div class="flex items-center gap-1.5 mt-2">
           ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call" data-stop><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text" data-stop><i data-lucide="message-square"></i></a>` : ''}
-          ${l.email ? `<a class="act" href="${mailLink(l.email)}" title="Email" data-stop><i data-lucide="mail"></i></a>` : ''}
+          ${l.email ? `<button class="act" data-compose="${escA(l.email)}" data-compose-name="${escA(l.name)}" data-compose-lead="${l.id}" data-stop title="Email via Gmail"><i data-lucide="mail"></i></button>` : ''}
           ${l.budget ? `<span class="text-[11px] text-muted ml-auto">${esc(l.budget)}</span>` : ''}
         </div>
       </div>`;
@@ -420,7 +424,7 @@
           <td>${l.timeline ? esc(l.timeline) : '<span class="text-muted">—</span>'}</td>
           <td>${l.financing ? esc(l.financing) : '<span class="text-muted">—</span>'}</td>
           <td><span class="badge ${priBadge(r.priority)}">${r.priority}</span></td>
-          <td>${contactActions(l.name, l.phone, l.email)}</td>
+          <td>${contactActions(l.name, l.phone, l.email, l.id)}</td>
           <td><div class="flex items-center gap-1 justify-end">
             <button class="act" data-log="${l.id}" title="Log call"><i data-lucide="phone-call"></i></button>
             <button class="act" data-view="${l.id}" title="Open"><i data-lucide="panel-right-open"></i></button>
@@ -501,7 +505,7 @@
         <span class="badge ${stageTone(l.stage || 'New')}">${esc(l.stage || 'New')}</span>
         <span class="badge ${priBadge(r.priority)}">${r.priority} readiness</span>
         ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call"><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text"><i data-lucide="message-square"></i></a>` : ''}
-        ${l.email ? `<a class="act" href="${mailLink(l.email)}" title="Email"><i data-lucide="mail"></i></a>` : ''}
+        ${l.email ? `<button class="act" data-drawer-email title="Email via Gmail"><i data-lucide="mail"></i></button>` : ''}
         <div class="ml-auto flex gap-1.5">
           ${l.email ? `<button class="btn-ghost" data-email><i data-lucide="send"></i>Email</button>` : ''}
           <button class="btn-ghost" data-edit><i data-lucide="pencil"></i>Edit</button>
@@ -524,6 +528,8 @@
     const root = document.querySelector('.modal');
     const emailBtn = root.querySelector('[data-email]');
     if (emailBtn) emailBtn.addEventListener('click', () => { closeModal(); emailLeadModal(l); });
+    const envBtn = root.querySelector('[data-drawer-email]');
+    if (envBtn) envBtn.addEventListener('click', () => { closeModal(); emailLeadModal(l); });
     root.querySelector('[data-edit]').addEventListener('click', () => { closeModal(); leadModal(l); });
     root.querySelector('[data-log]').addEventListener('click', () => { closeModal(); logCallModal(l); });
     root.querySelector('[data-close-lead]').addEventListener('click', () => { closeModal(); closeLeadModal(l); });
@@ -542,9 +548,12 @@
     }));
   }
 
-  // 1:1 email to a lead, sent via the agent's Gmail/SMTP and logged to the timeline.
-  function emailLeadModal(lead) {
-    const first = (lead.name || '').trim().split(/\s+/)[0] || 'there';
+  // 1:1 email compose, sent via the agent's connected Gmail (SMTP fallback).
+  // `target` is a lead (has .id — send is logged to its timeline) or any
+  // {name, email} (contacts, past clients).
+  function emailLeadModal(target) {
+    const isLead = !!target.id;
+    const first = (target.name || '').trim().split(/\s+/)[0] || 'there';
     const agent = (me && me.name) || 'Your agent';
     const fill = (t) => t.replace(/\{name\}/g, first).replace(/\{agent\}/g, agent);
     const TEMPLATES = {
@@ -555,8 +564,8 @@
       'Thank you': { subject: 'Thank you, {name}!', body: `Hi {name},\n\nThank you for your time today — it was great talking. I'll follow up with the next steps shortly.\n\nBest,\n{agent}` }
     };
     const keys = Object.keys(TEMPLATES);
-    openModal('Email ' + lead.name, `
-      <p class="text-[12px] text-muted mb-3">Sends from your connected Gmail to <b>${escA(lead.email)}</b> and logs it on the timeline.</p>
+    openModal('Email ' + target.name, `
+      <div id="em-from" class="text-[12px] text-muted mb-3">Sends to <b>${escA(target.email)}</b>${isLead ? ' and logs it on the timeline' : ''}.</div>
       <div class="field mb-3"><label class="lbl">Template</label>
         <select class="input mt-1" id="tpl">${keys.map(k => `<option>${k}</option>`).join('')}</select></div>
       <div class="field mb-3"><label class="lbl">Subject</label><input class="input mt-1" id="em-subj" value="${escA(fill(TEMPLATES.Intro.subject))}"></div>
@@ -566,10 +575,12 @@
         const body = root.querySelector('#em-bd').value.trim();
         if (!subject) throw new Error('A subject is required.');
         if (!body) throw new Error('The message is empty.');
-        const r = await api('/api/realtor/leads/' + lead.id + '/email', { method: 'POST', body: JSON.stringify({ subject, body }) });
+        const r = isLead
+          ? await api('/api/realtor/leads/' + target.id + '/email', { method: 'POST', body: JSON.stringify({ subject, body }) })
+          : await api('/api/realtor/email', { method: 'POST', body: JSON.stringify({ to: target.email, subject, body }) });
         toast('Email sent' + (r.via === 'gmail' ? ' via Gmail' : ''));
         // Reopen the lead after this modal closes so the logged email shows.
-        setTimeout(() => { if (active === 'leads' || active === 'pipeline') leadDrawer(lead.id); }, 20);
+        if (isLead) setTimeout(() => { if (active === 'leads' || active === 'pipeline') leadDrawer(target.id); }, 20);
       });
     const root = document.querySelector('.modal');
     // Default the picker to Intro (already prefilled) and swap on change.
@@ -579,7 +590,33 @@
       root.querySelector('#em-subj').value = fill(t.subject);
       root.querySelector('#em-bd').value = fill(t.body);
     });
+    // Say which Gmail account this sends as; offer to connect one if none is.
+    api('/api/google/status').then(s => {
+      const el = root.querySelector('#em-from');
+      if (!el) return; // modal already closed
+      if (s.connected) {
+        el.innerHTML = `Sends as <b>${escA(s.email || 'your Gmail')}</b> to <b>${escA(target.email)}</b>${isLead ? ' and logs it on the timeline' : ''}.
+          <span class="text-muted">Wrong account? Switch it in Auto Emails.</span>`;
+      } else if (s.configured) {
+        el.innerHTML = `<span style="color:#B07A00">No Gmail connected — </span>
+          <button type="button" class="font-semibold" id="em-connect" style="color:var(--accent)">connect your Google account</button>
+          <span style="color:#B07A00"> to send this as you.</span>`;
+        const btn = root.querySelector('#em-connect');
+        if (btn) btn.addEventListener('click', () => { location.href = '/api/google/connect?from=' + active; });
+      }
+    }).catch(() => {});
   }
+
+  // One delegated listener covers every envelope button the tables render.
+  // Capture phase, because pipeline quick-actions stopPropagation on click.
+  $('view').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-compose]');
+    if (!btn) return;
+    e.stopPropagation();
+    const leadId = Number(btn.dataset.composeLead);
+    const lead = leadId ? leadCache.find(x => x.id === leadId) : null;
+    emailLeadModal(lead || { name: btn.dataset.composeName || '', email: btn.dataset.compose });
+  }, true);
 
   function logCallModal(lead) {
     const outcomes = ['Connected', 'Voicemail', 'No Answer', 'Missed'];
