@@ -287,6 +287,9 @@ const SCHEMA = `
     last_run_date TEXT,
     updated_at    TIMESTAMPTZ DEFAULT now()
   );
+  -- Which send (last_run_date) the AI freshness pass already rewrote the
+  -- email after, so each edition is only regenerated once.
+  ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS refreshed_for TEXT;
 
   -- Per-user connected Google account (for sending weekly email as themselves
   -- via the Gmail API). Tokens may be stored encrypted (see TOKEN_ENC_KEY).
@@ -1639,6 +1642,120 @@ function mailer() {
 }
 const mailFrom = () => process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@localhost';
 
+// ===================================================================
+// AI writer — keeps the weekly email fresh
+// ===================================================================
+// Models are tried in order until one answers; a failure (no credits, model
+// down, wrong type) just moves the chain along:
+//   1. Native Gemini API (GEMINI_API_KEY) — every Gemini text model, newest first.
+//   2. llm7.io (LLM7_API_KEY, OpenAI-compatible) — its gemini-named models
+//      first, then every other chat model it hosts.
+// The last model that worked is remembered and tried first next time.
+const GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+                       'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash'];
+const aiConfigured = () => !!(process.env.GEMINI_API_KEY || process.env.LLM7_API_KEY);
+
+function fetchTimeout(url, opts, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms || 25000);
+  return fetch(url, Object.assign({}, opts, { signal: ctl.signal })).finally(() => clearTimeout(t));
+}
+
+// llm7's model list, cached for an hour. Chat models only; gemini-named first.
+let _llm7Models = { at: 0, list: [] };
+async function llm7ModelChain() {
+  if (Date.now() - _llm7Models.at < 3600000 && _llm7Models.list.length) return _llm7Models.list;
+  let ids = [];
+  try {
+    const r = await fetchTimeout('https://api.llm7.io/v1/models', {
+      headers: { Authorization: 'Bearer ' + process.env.LLM7_API_KEY }
+    }, 15000);
+    if (r.ok) ids = ((await r.json()).data || []).filter(m => m.model_type === 'chat' || /gemini/i.test(m.id)).map(m => m.id);
+  } catch (e) { /* fall back to the static list below */ }
+  if (!ids.length) ids = ['gemini-veo31', 'minimax-m2.7', 'codestral-latest', 'gpt-5.4-mini', 'kimi-k3', 'deepseek-v4-flash'];
+  const gemini = ids.filter(i => /gemini/i.test(i));
+  const rest = ids.filter(i => !/gemini/i.test(i) && !/image|video|veo|flux|firefly/i.test(i));
+  _llm7Models = { at: Date.now(), list: gemini.concat(rest) };
+  return _llm7Models.list;
+}
+
+async function geminiCall(model, prompt) {
+  const r = await fetchTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) });
+  if (!r.ok) throw new Error(`gemini ${model} ${r.status}`);
+  const j = await r.json();
+  return (((j.candidates || [])[0] || {}).content?.parts || []).map(p => p.text || '').join('');
+}
+async function llm7Call(model, prompt) {
+  const r = await fetchTimeout('https://api.llm7.io/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + process.env.LLM7_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.9, max_tokens: 700 })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(`llm7 ${model} ${(j.error && j.error.message) || r.status}`);
+  return (((j.choices || [])[0] || {}).message || {}).content || '';
+}
+
+let _aiLastGood = null; // { kind, model }
+async function aiComplete(prompt) {
+  const attempts = [];
+  if (process.env.GEMINI_API_KEY) GEMINI_MODELS.forEach(m => attempts.push({ kind: 'gemini', model: m }));
+  if (process.env.LLM7_API_KEY) (await llm7ModelChain()).forEach(m => attempts.push({ kind: 'llm7', model: m }));
+  if (!attempts.length) throw new Error('No AI configured — set GEMINI_API_KEY or LLM7_API_KEY.');
+  if (_aiLastGood) {
+    const i = attempts.findIndex(a => a.kind === _aiLastGood.kind && a.model === _aiLastGood.model);
+    if (i > 0) attempts.unshift(attempts.splice(i, 1)[0]);
+  }
+  for (const a of attempts) {
+    try {
+      const text = a.kind === 'gemini' ? await geminiCall(a.model, prompt) : await llm7Call(a.model, prompt);
+      if (text && text.trim()) { _aiLastGood = a; return text; }
+      console.error(`ai: ${a.kind}/${a.model} returned empty — trying next`);
+    } catch (e) { console.error(`ai: ${a.kind}/${a.model} failed (${e.message}) — trying next`); }
+  }
+  throw new Error('Every AI model failed — check the API keys / balances.');
+}
+
+// Write next week's edition of the user's weekly email, in the same voice,
+// and save it. The greeting keeps the {{name}} token so personalization works.
+async function regenerateWeeklyEmail(userId) {
+  const s = await loadEmailSettings(userId);
+  const subject = s.subject || DEFAULT_SUBJECT;
+  const body = s.body || DEFAULT_BODY;
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const text = await aiComplete(
+`You write the short weekly check-in email a real-estate agent sends to their mailing list.
+Today's date is ${today} — keep any seasonal references accurate to that.
+
+This week's edition (already sent):
+Subject: ${subject}
+Body:
+${body}
+
+Write NEXT week's edition. Rules:
+- Same voice and the same sign-off name as the current email.
+- A fresh angle so subscribers never get a repeat (rotate between: a practical homeowner tip, a general market observation, a seasonal note, a friendly hello). Do not reuse this week's wording.
+- Plain text only, no markdown. Under 130 words.
+- The body must start with: Hi {{name}},   (keep {{name}} exactly as written — it becomes the recipient's first name)
+- Never invent specific statistics, prices, addresses, or listings.
+
+Answer with ONLY a JSON object, no other text: {"subject": "...", "body": "..."}`);
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('The AI reply was not in the expected format.');
+  let out;
+  try { out = JSON.parse(m[0]); } catch (e) { throw new Error('The AI reply was not valid JSON.'); }
+  let newSubject = String(out.subject || '').trim().slice(0, 200);
+  let newBody = String(out.body || '').trim().slice(0, 4000);
+  if (!newSubject || !newBody) throw new Error('The AI reply was missing a subject or body.');
+  if (!/\{\{\s*name\s*\}\}/i.test(newBody)) newBody = 'Hi {{name}},\n\n' + newBody;
+  await q('UPDATE email_settings SET subject = $1, body = $2, updated_at = now() WHERE user_id = $3',
+    [newSubject, newBody, userId]);
+  return { subject: newSubject, body: newBody };
+}
+
 const DEFAULT_SUBJECT = 'A quick note from your agent';
 const DEFAULT_BODY = `Hi {{name}},
 
@@ -1720,10 +1837,23 @@ app.get('/api/realtor/emails', safe(async (req, res) => {
     settings,
     weekdays: WEEKDAYS,
     gmail,
+    ai: aiConfigured(),
     // Sending works if Gmail is connected OR SMTP is set up.
     canSend: gmail.connected || emailConfigured(),
     history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, at: h.created_at }))
   });
+}));
+
+// Draft next week's edition with AI right now (same generator the day-after
+// freshness pass uses). Returns the new subject/body, already saved.
+app.post('/api/realtor/emails/regenerate', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  if (!aiConfigured()) return res.status(400).json({ error: 'AI isn’t configured on this server (set LLM7_API_KEY or GEMINI_API_KEY).' });
+  try {
+    res.json(await regenerateWeeklyEmail(req.user.id));
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
 }));
 
 app.post('/api/realtor/emails/recipients', safe(async (req, res) => {
@@ -1817,7 +1947,33 @@ async function dispatchWeeklyEmails() {
     try { await sendWeeklyFor(s.user_id, 'weekly'); ran++; }
     catch (e) { console.error('weekly dispatch for user', s.user_id, e.message); }
   }
-  return { ran };
+
+  // Freshness pass: the day AFTER an edition goes out (send Monday → rewrite
+  // Tuesday), draft next week's edition with AI so the same email never sends
+  // twice. refreshed_for marks which send we already rewrote after, and is
+  // claimed first so overlapping cron runs can't double-generate.
+  let refreshed = 0;
+  if (aiConfigured()) {
+    const stale = await q(`SELECT s.user_id, s.last_run_date, u.tz FROM email_settings s
+                           JOIN users u ON u.id = s.user_id
+                           WHERE s.enabled = TRUE AND s.last_run_date IS NOT NULL
+                             AND (s.refreshed_for IS DISTINCT FROM s.last_run_date)`);
+    for (const s of stale) {
+      const today = (s.tz ? todayInTz(s.tz) : serverToday());
+      if (today <= s.last_run_date) continue; // wait until the day after the send
+      const claim = await pool.query(
+        `UPDATE email_settings SET refreshed_for = $1 WHERE user_id = $2 AND (refreshed_for IS DISTINCT FROM $1)`,
+        [s.last_run_date, s.user_id]);
+      if (claim.rowCount === 0) continue;
+      try { await regenerateWeeklyEmail(s.user_id); refreshed++; }
+      catch (e) {
+        console.error('weekly refresh for user', s.user_id, e.message);
+        // Give the claim back so the next cron run retries.
+        await q('UPDATE email_settings SET refreshed_for = NULL WHERE user_id = $1', [s.user_id]);
+      }
+    }
+  }
+  return { ran, refreshed };
 }
 
 // External cron trigger (protect with CRON_SECRET). Safe to call every few minutes.

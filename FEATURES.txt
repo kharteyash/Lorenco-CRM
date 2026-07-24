@@ -122,6 +122,12 @@ CROSS-CUTTING FEATURES
   call queue, and the "who to call" list on Home.
 - ACTIVITY TIMELINE: notes, logged calls, and sent emails all appear on a
   lead's timeline in one place.
+- AI FRESHNESS: the day after each weekly send (send Monday → new draft
+  Tuesday), AI writes next week's edition in the same voice with a fresh
+  angle, so subscribers never get a repeat. Also on demand via the
+  "Write next week's with AI" button. Models are tried in a fallback
+  chain (Gemini models first, then llm7.io's other chat models) until
+  one answers; set GEMINI_API_KEY / LLM7_API_KEY to enable.
 - CONNECT GOOGLE: connect your Google account once; the weekly email and
   1:1 lead emails send from your own address via the Gmail API, and the
   calendar syncs two-way with your Google Calendar. (Accounts connected

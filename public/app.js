@@ -1302,10 +1302,12 @@
       </div>
       <div class="panel p-5 mt-5" style="max-width:720px">
         <h3 class="text-[14px] font-bold mb-1">The email</h3>
-        <p class="text-[12px] text-muted mb-3">This is what goes out each week. Edit it anytime — write it in your own words and sign with your real name so it doesn't read like a template. <span class="font-mono">{{name}}</span> becomes each recipient's first name.</p>
+        <p class="text-[12px] text-muted mb-3">This is what goes out each week. Edit it anytime — write it in your own words and sign with your real name so it doesn't read like a template. <span class="font-mono">{{name}}</span> becomes each recipient's first name.${emailData.ai ? ' The day after each send, AI drafts the next edition automatically so the list never gets a repeat.' : ''}</p>
         <div class="field mb-3"><label class="lbl">Subject</label><input id="em-subject" class="input mt-1" value="${escA(s.subject)}"></div>
         <div class="field mb-3"><label class="lbl">Message</label><textarea id="em-body" class="input mt-1" style="min-height:180px">${esc(s.body)}</textarea></div>
-        <div class="flex items-center gap-3"><button class="btn-primary" id="em-save"><i data-lucide="check"></i>Save email</button><span id="em-msg" class="text-[12.5px] font-medium"></span></div>
+        <div class="flex items-center gap-3 flex-wrap"><button class="btn-primary" id="em-save"><i data-lucide="check"></i>Save email</button>
+          ${emailData.ai ? `<button class="btn-ghost" id="em-ai"><i data-lucide="sparkles"></i>Write next week's with AI</button>` : ''}
+          <span id="em-msg" class="text-[12.5px] font-medium"></span></div>
       </div>
       ${history}`;
     icons();
@@ -1363,6 +1365,20 @@
       const msg = $('em-msg'); msg.style.color = '#C23B3B';
       try { await saveSettings({}); msg.style.color = '#1B7F4B'; msg.textContent = 'Saved.'; toast('Email saved'); }
       catch (e) { msg.textContent = e.message; }
+    });
+    const aiBtn = $('em-ai');
+    if (aiBtn) aiBtn.addEventListener('click', async () => {
+      aiBtn.disabled = true;
+      const label = aiBtn.innerHTML;
+      aiBtn.innerHTML = `<i data-lucide="loader"></i>Writing...`; icons();
+      try {
+        const r = await api('/api/realtor/emails/regenerate', { method: 'POST' });
+        $('em-subject').value = r.subject; $('em-body').value = r.body;
+        emailData.settings.subject = r.subject; emailData.settings.body = r.body;
+        Object.assign(s, { subject: r.subject, body: r.body });
+        toast('Fresh email drafted ✨');
+      } catch (e) { toast(e.message, 'alert-triangle'); }
+      finally { aiBtn.disabled = false; aiBtn.innerHTML = label; icons(); }
     });
     $('em-send').addEventListener('click', async () => {
       if (!recips.length) return toast('Add someone to your list first.', 'info');
