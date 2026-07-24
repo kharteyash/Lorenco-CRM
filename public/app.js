@@ -184,9 +184,14 @@
   function composeBtn(name, email, leadId) {
     return `<button class="act" data-compose="${escA(email)}" data-compose-name="${escA(name)}"${leadId ? ` data-compose-lead="${leadId}"` : ''} title="Email via Gmail"><i data-lucide="mail"></i></button>`;
   }
+  // For leads, the phone quick-action also opens the log-call modal (the
+  // tel: handoff to the dialer still happens) so the call gets recorded.
+  function callAttrs(name, phone, leadId) {
+    return leadId ? ` data-call-lead="${leadId}" data-call-name="${escA(name)}" data-call-phone="${escA(phone)}"` : '';
+  }
   function contactActions(name, phone, email, leadId) {
     const a = [];
-    if (phone) a.push(`<a class="act" href="${telLink(phone)}" title="Call"><i data-lucide="phone"></i></a>`);
+    if (phone) a.push(`<a class="act" href="${telLink(phone)}" title="${leadId ? 'Call & log it' : 'Call'}"${callAttrs(name, phone, leadId)}><i data-lucide="phone"></i></a>`);
     if (phone) a.push(`<a class="act" href="${smsLink(phone)}" title="Text"><i data-lucide="message-square"></i></a>`);
     if (email) a.push(composeBtn(name, email, leadId));
     return `<div class="flex items-center gap-1.5">${a.join('') || '<span class="text-muted text-[12px]">—</span>'}</div>`;
@@ -210,7 +215,7 @@
         <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(x.name)}</div>
           <div class="text-[11.5px] text-muted truncate">${esc(x.reason)}</div></div>
         <span class="badge ${priBadge(x.priority)}">${x.priority}</span>
-        ${x.phone ? `<a class="act" href="${telLink(x.phone)}" title="Call"><i data-lucide="phone"></i></a>` : ''}
+        ${x.phone ? `<a class="act" href="${telLink(x.phone)}" title="Call & log it"${callAttrs(x.name, x.phone, x.leadId)}><i data-lucide="phone"></i></a>` : ''}
       </div>`).join('') : `<div class="text-[13px] text-muted py-4 text-center">No calls queued — add leads with a phone number.</div>`;
     const tasks = d.tasksToday.length ? d.tasksToday.map(t => `
       <div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0">
@@ -298,12 +303,12 @@
       const r = clientScore(l);
       return `<div class="pipe-card" draggable="true" data-card="${l.id}">
         <div class="flex items-start justify-between gap-2">
-          <div class="font-semibold text-[13px] leading-tight">${esc(l.name)}</div>
+          <div class="font-semibold text-[13px] leading-tight" data-lead-tip="${l.id}">${esc(l.name)}</div>
           <span class="badge ${priBadge(r.priority)}" style="flex-shrink:0">${r.priority}</span>
         </div>
         <div class="text-[11.5px] text-muted mt-1 truncate">${esc([l.timeline, l.area].filter(Boolean).join(' · ')) || 'No details yet'}</div>
         <div class="flex items-center gap-1.5 mt-2">
-          ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call" data-stop><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text" data-stop><i data-lucide="message-square"></i></a>` : ''}
+          ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call & log it" data-stop${callAttrs(l.name, l.phone, l.id)}><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text" data-stop><i data-lucide="message-square"></i></a>` : ''}
           ${l.email ? `<button class="act" data-compose="${escA(l.email)}" data-compose-name="${escA(l.name)}" data-compose-lead="${l.id}" data-stop title="Email via Gmail"><i data-lucide="mail"></i></button>` : ''}
           ${l.budget ? `<span class="text-[11px] text-muted ml-auto">${esc(l.budget)}</span>` : ''}
         </div>
@@ -419,7 +424,7 @@
         const r = clientScore(l);
         return `<tr>
           <td><div class="flex items-center gap-2.5"><div class="avatar sm">${initials(l.name)}</div>
-            <div class="min-w-0"><div class="font-semibold text-[13px] truncate">${esc(l.name)}</div>
+            <div class="min-w-0"><div class="font-semibold text-[13px] truncate" data-lead-tip="${l.id}">${esc(l.name)}</div>
             <div class="text-[11.5px] text-muted truncate">${esc([l.intent, l.area].filter(Boolean).join(' · ')) || '—'}</div></div></div></td>
           <td>${l.timeline ? esc(l.timeline) : '<span class="text-muted">—</span>'}</td>
           <td>${l.financing ? esc(l.financing) : '<span class="text-muted">—</span>'}</td>
@@ -504,7 +509,7 @@
       <div class="flex items-center gap-2 mb-3 flex-wrap">
         <span class="badge ${stageTone(l.stage || 'New')}">${esc(l.stage || 'New')}</span>
         <span class="badge ${priBadge(r.priority)}">${r.priority} readiness</span>
-        ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call"><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text"><i data-lucide="message-square"></i></a>` : ''}
+        ${l.phone ? `<a class="act" href="${telLink(l.phone)}" title="Call & log it"${callAttrs(l.name, l.phone, l.id)}><i data-lucide="phone"></i></a><a class="act" href="${smsLink(l.phone)}" title="Text"><i data-lucide="message-square"></i></a>` : ''}
         ${l.email ? `<button class="act" data-drawer-email title="Email via Gmail"><i data-lucide="mail"></i></button>` : ''}
         <div class="ml-auto flex gap-1.5">
           ${l.email ? `<button class="btn-ghost" data-email><i data-lucide="send"></i>Email</button>` : ''}
@@ -617,6 +622,68 @@
     const lead = leadId ? leadCache.find(x => x.id === leadId) : null;
     emailLeadModal(lead || { name: btn.dataset.composeName || '', email: btn.dataset.compose });
   }, true);
+
+  // Calling a lead also opens the log-call modal — the tel: link still fires
+  // (default action isn't cancelled), so the dialer opens while the log form
+  // waits behind it. On document, not #view: the lead drawer lives in a modal.
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('[data-call-lead]');
+    if (!a) return;
+    const id = Number(a.dataset.callLead);
+    const lead = leadCache.find(x => x.id === id) || { id, name: a.dataset.callName || '', phone: a.dataset.callPhone || '' };
+    // A beat later, so the browser's "open your phone app" handoff goes first.
+    setTimeout(() => logCallModal(lead), 150);
+  }, true);
+
+  // ---------- Hover card: a lead's notes ----------
+  // Hovering a lead's name (leads table, pipeline cards) shows their notes:
+  // the profile notes field plus the latest timeline notes, fetched lazily
+  // and cached briefly so hovering around a list doesn't hammer the API.
+  const noteCache = new Map(); // leadId -> { at, notes: [..], profile }
+  async function leadNotes(id) {
+    const hit = noteCache.get(id);
+    if (hit && Date.now() - hit.at < 30000) return hit;
+    const lead = leadCache.find(x => x.id === id);
+    let items = [];
+    try { items = ((await api('/api/realtor/leads/' + id + '/timeline')).items || []); } catch (e) {}
+    const entry = {
+      at: Date.now(),
+      profile: (lead && lead.notes || '').trim(),
+      notes: items.filter(it => it.kind === 'note').slice(0, 4)
+    };
+    noteCache.set(id, entry);
+    return entry;
+  }
+  let tipEl = null, tipTimer = null, tipFor = null;
+  function hideTip() {
+    clearTimeout(tipTimer); tipTimer = null; tipFor = null;
+    if (tipEl) tipEl.classList.add('hidden');
+  }
+  async function showTip(target, id) {
+    if (!tipEl) { tipEl = document.createElement('div'); tipEl.id = 'lead-tip'; tipEl.className = 'hidden'; document.body.appendChild(tipEl); }
+    const d = await leadNotes(id);
+    if (tipFor !== target) return; // hovered away while loading
+    const clip = (s) => { s = String(s); return s.length > 140 ? s.slice(0, 140) + '…' : s; };
+    const rows = d.notes.map(n => `<div class="lead-tip-row"><span>${esc(clip(n.body))}</span><em>${fmtWhen(n.at)}</em></div>`).join('');
+    const profile = d.profile ? `<div class="lead-tip-profile">${esc(clip(d.profile))}</div>` : '';
+    tipEl.innerHTML = `<div class="lead-tip-head"><i data-lucide="sticky-note"></i>Notes</div>
+      ${profile}${rows || (profile ? '' : '<div class="lead-tip-empty">No notes yet — open the lead to add one.</div>')}`;
+    icons();
+    const r = target.getBoundingClientRect();
+    tipEl.classList.remove('hidden');
+    const w = tipEl.offsetWidth;
+    tipEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+    tipEl.style.top = Math.min(r.bottom + 7, window.innerHeight - tipEl.offsetHeight - 8) + 'px';
+  }
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest('[data-lead-tip]');
+    if (t === tipFor) return;
+    hideTip();
+    if (!t) return;
+    tipFor = t;
+    tipTimer = setTimeout(() => showTip(t, Number(t.dataset.leadTip)), 220);
+  });
+  ['scroll', 'click'].forEach(ev => document.addEventListener(ev, hideTip, true));
 
   function logCallModal(lead) {
     const outcomes = ['Connected', 'Voicemail', 'No Answer', 'Missed'];
