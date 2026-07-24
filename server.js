@@ -782,9 +782,9 @@ app.delete('/api/realtor/leads/:id/notes/:noteId', safe(async (req, res) => {
 async function sendSingleEmail(userId, to, subject, body) {
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   if (gmail) {
-    const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
-    const from = u && u.name ? `${u.name} <${gmail.email}>` : gmail.email;
-    await sendViaGmail(userId, from, to, subject, body);
+    // Bare address on purpose: Gmail then applies the account's own display
+    // name (the user's real Google name) instead of their CRM account name.
+    await sendViaGmail(userId, gmail.email, to, subject, body);
     return 'gmail';
   }
   const tx = mailer();
@@ -1618,7 +1618,7 @@ function mailer() {
 const mailFrom = () => process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@localhost';
 
 const DEFAULT_SUBJECT = 'A quick note from your agent';
-const DEFAULT_BODY = `Hi there,
+const DEFAULT_BODY = `Hi {{name}},
 
 Just checking in with this week's update. If you're thinking about buying or
 selling — or know someone who is — I'd love to help.
@@ -1627,6 +1627,13 @@ Reply anytime; I'm always happy to talk.
 
 Best,
 Your agent`;
+// {{name}} in the subject or body becomes the recipient's first name (or
+// "there" when we don't have one), so each copy is personal — friendlier,
+// and less likely to be flagged as identical bulk mail.
+function personalizeEmail(text, name) {
+  const first = String(name || '').trim().split(/\s+/)[0] || '';
+  return String(text || '').replace(/\{\{\s*name\s*\}\}/gi, first || 'there');
+}
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 async function loadEmailSettings(userId) {
@@ -1659,20 +1666,19 @@ async function sendWeeklyFor(userId, trigger) {
   // Pick a channel: connected Gmail first, else SMTP.
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   const tx = mailer();
-  let via = null, gmailFrom = '';
-  if (gmail) {
-    const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
-    gmailFrom = u && u.name ? `${u.name} <${gmail.email}>` : gmail.email;
-    via = 'gmail';
-  } else if (tx) { via = 'smtp'; }
+  let via = null;
+  if (gmail) { via = 'gmail'; } // bare From address — Gmail applies the account's real display name
+  else if (tx) { via = 'smtp'; }
   else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
   let sent = 0, failed = 0;
   for (const r of recips) {
+    const subj = personalizeEmail(subject, r.name);
+    const text = personalizeEmail(body, r.name);
     try {
-      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subject, body);
-      else await tx.sendMail({ from: mailFrom(), to: r.email, subject, text: body,
-        html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
+      if (via === 'gmail') await sendViaGmail(userId, gmail.email, r.email, subj, text);
+      else await tx.sendMail({ from: mailFrom(), to: r.email, subject: subj, text,
+        html: `<div style="white-space:pre-wrap;font-family:sans-serif">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
       sent++;
     } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
   }
