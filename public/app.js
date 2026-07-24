@@ -1109,7 +1109,8 @@
     try { emailData = await api('/api/realtor/emails'); } catch (e) { return errView(e); }
     // One-time toast after returning from the Google consent screen.
     const gp = new URLSearchParams(location.search).get('gmail');
-    if (gp) { toast(gp === 'connected' ? 'Gmail connected' : 'Couldn\'t connect Gmail', gp === 'connected' ? 'check-circle-2' : 'alert-triangle'); history.replaceState(null, '', location.pathname + location.hash); }
+    // window.history — a local `const history` below shadows the global here.
+    if (gp) { toast(gp === 'connected' ? 'Gmail connected' : 'Couldn\'t connect Gmail', gp === 'connected' ? 'check-circle-2' : 'alert-triangle'); window.history.replaceState(null, '', location.pathname + location.hash); }
 
     const s = emailData.settings, wd = emailData.weekdays, gmail = emailData.gmail;
 
