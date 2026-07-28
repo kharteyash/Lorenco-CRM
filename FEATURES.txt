@@ -35,8 +35,11 @@ PIPELINE  (kanban board)
 LEADS
 - Your book of business: add, edit, search, and delete leads.
 - Rich fields: contact info, intent (buying/selling/both), timeline,
-  budget, property type, area/zip, financing, credit, assets, notes,
-  stage, and source.
+  budget, property type, area/zip, financing, credit, notes, stage,
+  and source. Selling leads hide the buyer-only fields (financing,
+  credit, budget).
+- Schedule a follow-up right from the lead form: pick a date & time and
+  a linked task appears in Follow-ups and on the calendar at that hour.
 - Readiness score: each lead is auto-ranked High/Medium/Low from timeline,
   financing, credit, intent, and assets (drives the call queue).
 - Lead drawer (click a lead): full details, an activity timeline

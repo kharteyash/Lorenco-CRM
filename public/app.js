@@ -221,7 +221,7 @@
       <div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0">
         <button class="act" data-done="${t.id}" title="Mark done"><i data-lucide="circle"></i></button>
         <div class="min-w-0 flex-1"><div class="text-[13px] font-medium truncate">${esc(t.title)}</div>
-          <div class="text-[11.5px] ${t.overdue ? 'text-rose-500 font-semibold' : 'text-muted'}">${t.overdue ? 'Overdue · ' : ''}${fmtDate(t.due)}</div></div>
+          <div class="text-[11.5px] ${t.overdue ? 'text-rose-500 font-semibold' : 'text-muted'}">${t.overdue ? 'Overdue · ' : ''}${fmtDate(t.due)}${t.time ? ' · ' + fmtTimeSafe(t.time) : ''}</div></div>
         <span class="badge ${priBadge(t.priority)}">${t.priority}</span>
       </div>`).join('') : `<div class="text-[13px] text-muted py-4 text-center">Nothing due. You're all caught up 🎉</div>`;
     const feed = d.activity.length ? d.activity.map(a => `
@@ -467,23 +467,45 @@
         <div class="field"><label class="lbl">Source</label><input class="input" data-f="source" value="${escA(l.source)}" placeholder="Zillow, referral, open house..."></div>
         <div class="field"><label class="lbl">Intent</label>${sel('intent', INTENTS, l.intent)}</div>
         <div class="field"><label class="lbl">Timeline</label>${sel('timeline', TIMELINES, l.timeline)}</div>
-        <div class="field"><label class="lbl">Financing</label>${sel('financing', FINANCING, l.financing)}</div>
-        <div class="field"><label class="lbl">Credit score</label>${sel('creditScore', CREDIT, l.creditScore)}</div>
-        <div class="field"><label class="lbl">Budget</label><input class="input" data-f="budget" value="${escA(l.budget)}" placeholder="$400k–$500k"></div>
+        <div class="field" data-buyer-only><label class="lbl">Financing</label>${sel('financing', FINANCING, l.financing)}</div>
+        <div class="field" data-buyer-only><label class="lbl">Credit score</label>${sel('creditScore', CREDIT, l.creditScore)}</div>
+        <div class="field" data-buyer-only><label class="lbl">Budget</label><input class="input" data-f="budget" value="${escA(l.budget)}" placeholder="$400k–$500k"></div>
         <div class="field"><label class="lbl">Property type</label><input class="input" data-f="propertyType" value="${escA(l.propertyType)}" placeholder="Single family"></div>
         <div class="field"><label class="lbl">Area / city</label><input class="input" data-f="area" value="${escA(l.area)}" placeholder="Austin, TX"></div>
         <div class="field"><label class="lbl">Zip</label><input class="input" data-f="zipcode" value="${escA(l.zipcode)}" placeholder="78701"></div>
-        <div class="field"><label class="lbl">Liquid assets</label><input class="input" data-f="assets" value="${escA(l.assets)}" placeholder="Down payment on hand"></div>
+        <div class="field"><label class="lbl">Follow up on</label><input class="input" type="datetime-local" data-f="followUp"></div>
         <div class="field full"><label class="lbl">Notes</label><textarea class="input" data-f="notes" placeholder="Anything worth remembering...">${esc(l.notes)}</textarea></div>
       </div>`,
       lead ? 'Save changes' : 'Add lead', async (root) => {
         const body = collect(root);
         if (!body.name) throw new Error('A name is required.');
-        if (lead) await api('/api/realtor/leads/' + lead.id, { method: 'PATCH', body: JSON.stringify(body) });
-        else await api('/api/realtor/leads', { method: 'POST', body: JSON.stringify(body) });
-        toast(lead ? 'Lead updated' : 'Lead added');
+        // The follow-up picker isn't part of the lead record — it becomes a
+        // follow-up task (Follow-ups page + calendar) linked to this lead.
+        const followUp = body.followUp; delete body.followUp;
+        let saved;
+        if (lead) saved = await api('/api/realtor/leads/' + lead.id, { method: 'PATCH', body: JSON.stringify(body) });
+        else saved = await api('/api/realtor/leads', { method: 'POST', body: JSON.stringify(body) });
+        if (followUp) {
+          const [due, time] = followUp.split('T');
+          await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
+            title: 'Follow up with ' + body.name, due, time: time || '', priority: 'Medium',
+            leadId: lead ? lead.id : ((saved && saved.id) || null)
+          }) });
+        }
+        toast((lead ? 'Lead updated' : 'Lead added') + (followUp ? ' · follow-up scheduled' : ''));
         render();
       });
+    // Sellers don't have buyer finances: hide financing / credit / budget
+    // when the intent is Selling (Buying and Both keep them). Values aren't
+    // cleared, so flipping the intent back loses nothing.
+    const root = document.querySelector('.modal');
+    const intentSel = root.querySelector('[data-f="intent"]');
+    const syncBuyerFields = () => {
+      const selling = intentSel.value === 'Selling';
+      root.querySelectorAll('[data-buyer-only]').forEach(el => el.classList.toggle('hidden', selling));
+    };
+    intentSel.addEventListener('change', syncBuyerFields);
+    syncBuyerFields();
   }
 
   async function leadDrawer(id) {
@@ -962,7 +984,7 @@
         <div class="font-semibold" style="font-size:12.5px">${esc(e.title)}${e.meetLink ? ' · Join' : ''}</div>
         <div style="font-size:11px;opacity:.85">${esc(sub)}</div></div>`;
     }
-    const taskChip = (t) => `<div class="cal-chip task" data-task="1" style="border-left:3px solid ${taskColor(t.priority)}" title="${escA(t.title)} — ${t.priority} (open Follow-ups)"><i data-lucide="check-square"></i>${esc(t.title)}</div>`;
+    const taskChip = (t) => `<div class="cal-chip task" data-task="1" style="border-left:3px solid ${taskColor(t.priority)}" title="${escA(t.title)} — ${t.priority} (open Follow-ups)"><i data-lucide="check-square"></i>${t.time ? `<b>${fmtTime(t.time)}</b>&nbsp;` : ''}${esc(t.title)}</div>`;
     // The red "now" line, placed inside the current hour's cell for today.
     const nowLine = (ds, h) => (ds === todayStr && today.getHours() === h)
       ? `<div class="cal-nowline" style="top:${Math.round(today.getMinutes() / 60 * 100)}%"></div>` : '';
@@ -989,14 +1011,17 @@
     function weekBody() {
       const days = Array.from({ length: 7 }, (_, i) => calAddDays(startOfWeek(calCursor), i));
       const keys = days.map(dstr);
-      const timed = keys.flatMap(ds => eventsOn(ds).filter(e => e.start));
+      // Timed follow-ups sit in the hour grid like events; untimed ones stay
+      // in the all-day row.
+      const timed = keys.flatMap(ds => eventsOn(ds).filter(e => e.start)
+        .concat(tasksOn(ds).filter(t => t.time).map(t => ({ start: t.time }))));
       const header = `<div class="cal-wk-row" style="border-top:none;min-height:0">
         <div></div>${days.map((d, i) => `
           <div class="text-center py-1.5" style="border-left:1px solid var(--border)">
             <div class="cal-dow" style="padding:0">${CAL_DOW[d.getDay()]}</div>
             <div class="cal-wk-num ${keys[i] === todayStr ? 'today' : ''}">${d.getDate()}</div>
           </div>`).join('')}</div>`;
-      const allDayItems = (ds) => tasksOn(ds).map(taskChip).concat(eventsOn(ds).filter(e => !e.start).map(evChip));
+      const allDayItems = (ds) => tasksOn(ds).filter(t => !t.time).map(taskChip).concat(eventsOn(ds).filter(e => !e.start).map(evChip));
       const anyAllDay = keys.some(ds => allDayItems(ds).length);
       const allDayRow = anyAllDay ? `<div class="cal-wk-row" style="min-height:0;background:var(--surface-2)">
         <div class="cal-wk-time" style="font-size:10px">all-day</div>
@@ -1004,21 +1029,22 @@
       const rows = calHours(timed).map(h => `<div class="cal-wk-row">
         <div class="cal-wk-time">${fmtTime(pad2(h) + ':00')}</div>
         ${keys.map(ds => `<div class="cal-wk-cell ${ds === todayStr ? 'today' : ''}" data-slot="${ds}" data-hour="${h}">
-          ${nowLine(ds, h)}${eventsOn(ds).filter(e => e.start && +e.start.slice(0, 2) === h).map(evChip).join('')}</div>`).join('')}</div>`).join('');
+          ${nowLine(ds, h)}${tasksOn(ds).filter(t => t.time && +t.time.slice(0, 2) === h).map(taskChip).join('')}${eventsOn(ds).filter(e => e.start && +e.start.slice(0, 2) === h).map(evChip).join('')}</div>`).join('')}</div>`).join('');
       return `<div style="overflow-x:auto"><div class="cal-wk">${header}${allDayRow}${rows}</div></div>`;
     }
 
     function dayBody() {
       const ds = dstr(calCursor);
-      const dayTasks = tasksOn(ds);
+      const dayTasks = tasksOn(ds).filter(t => !t.time);
+      const timedTasks = tasksOn(ds).filter(t => t.time);
       const allDay = eventsOn(ds).filter(e => !e.start);
       const timed = eventsOn(ds).filter(e => e.start);
       const top = (dayTasks.length || allDay.length) ? `<div class="mb-3 flex flex-col gap-1.5">
         ${dayTasks.map(taskChip).join('')}${allDay.map(evBlock).join('')}</div>` : '';
-      const rows = calHours(timed).map(h => `<div class="cal-wk-row" style="grid-template-columns:64px 1fr">
+      const rows = calHours(timed.concat(timedTasks.map(t => ({ start: t.time })))).map(h => `<div class="cal-wk-row" style="grid-template-columns:64px 1fr">
         <div class="cal-wk-time">${fmtTime(pad2(h) + ':00')}</div>
         <div class="cal-wk-cell" data-slot="${ds}" data-hour="${h}">
-          ${nowLine(ds, h)}${timed.filter(e => +e.start.slice(0, 2) === h).map(evBlock).join('')}</div></div>`).join('');
+          ${nowLine(ds, h)}${timedTasks.filter(t => +t.time.slice(0, 2) === h).map(taskChip).join('')}${timed.filter(e => +e.start.slice(0, 2) === h).map(evBlock).join('')}</div></div>`).join('');
       return `${top}<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">${rows}</div>`;
     }
 
@@ -1172,7 +1198,7 @@
         <i data-lucide="${t.status === 'done' ? 'check-circle-2' : 'circle'}" ${t.status === 'done' ? 'style="color:#1B7F4B"' : ''}></i></button>
       <div class="min-w-0 flex-1">
         <div class="text-[13px] font-medium truncate ${t.status === 'done' ? 'line-through text-muted' : ''}">${esc(t.title)}</div>
-        <div class="text-[11.5px] text-muted">${[t.leadName, t.due ? fmtDate(t.due) : '', t.auto ? 'auto' : ''].filter(Boolean).join(' · ')}</div>
+        <div class="text-[11.5px] text-muted">${[t.leadName, t.due ? fmtDate(t.due) + (t.time ? ' ' + fmtTimeSafe(t.time) : '') : '', t.auto ? 'auto' : ''].filter(Boolean).join(' · ')}</div>
       </div>
       ${t.due && t.status === 'todo' && t.due < new Date().toISOString().slice(0, 10) ? '<span class="badge red">Overdue</span>' : ''}
       <span class="badge ${priBadge(t.priority)}">${t.priority}</span>
@@ -1202,6 +1228,7 @@
       <div class="field mb-3"><label class="lbl">Task *</label><input class="input" data-f="title" placeholder="Call back about inspection"></div>
       <div class="grid-form">
         <div class="field"><label class="lbl">Due date</label><input class="input" type="date" data-f="due"></div>
+        <div class="field"><label class="lbl">Time (optional)</label><input class="input" type="time" data-f="time"></div>
         <div class="field"><label class="lbl">Priority</label><select class="input" data-f="priority"><option>Medium</option><option>High</option><option>Low</option></select></div>
         <div class="field full"><label class="lbl">Link to lead (optional)</label>
           <select class="input" data-f="leadId"><option value="">— None —</option>${leads.map(l => `<option value="${l.id}">${escA(l.name)}</option>`).join('')}</select></div>

@@ -234,6 +234,9 @@ const SCHEMA = `
     completed_at TIMESTAMPTZ
   );
   CREATE INDEX IF NOT EXISTS realtor_tasks_owner ON realtor_tasks (realtor_id, id);
+  -- Optional time of day for a follow-up (HH:MM), so it can sit at the right
+  -- hour on the calendar instead of showing as an all-day item.
+  ALTER TABLE realtor_tasks ADD COLUMN IF NOT EXISTS due_time TEXT;
 
   -- Appointments / calendar (showings, open houses, closings, calls, meetings).
   CREATE TABLE IF NOT EXISTS realtor_appointments (
@@ -1052,7 +1055,7 @@ const REALTOR_TASK_PRIORITIES = ['High', 'Medium', 'Low'];
 function realtorTaskRowToJson(r) {
   return {
     id: r.id, leadId: r.lead_id || null, leadName: r.lead_name || '',
-    title: r.title, due: r.due_date || '', priority: r.priority || 'Medium',
+    title: r.title, due: r.due_date || '', time: r.due_time || '', priority: r.priority || 'Medium',
     status: r.status || 'todo', created: r.created_at, completedAt: r.completed_at || null,
     auto: !!(r.source && r.source.indexOf('auto') === 0)
   };
@@ -1063,6 +1066,7 @@ function cleanRealtorTask(b) {
   return {
     title: s(b.title, 200),
     due: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : '',
+    time: /^\d{2}:\d{2}$/.test(s(b.time, 5)) ? s(b.time, 5) : '',
     priority: REALTOR_TASK_PRIORITIES.includes(s(b.priority, 10)) ? s(b.priority, 10) : 'Medium',
     leadId: Number.isInteger(b.leadId) ? b.leadId : null
   };
@@ -1085,9 +1089,9 @@ app.post('/api/realtor/tasks', safe(async (req, res) => {
   if (!f.title) return res.status(400).json({ error: 'A task is required.' });
   const leadId = await ownRealtorLead(req.user.id, f.leadId);
   const row = await one(
-    `INSERT INTO realtor_tasks (realtor_id, lead_id, title, due_date, priority)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [req.user.id, leadId, f.title, f.due || null, f.priority]
+    `INSERT INTO realtor_tasks (realtor_id, lead_id, title, due_date, due_time, priority)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [req.user.id, leadId, f.title, f.due || null, f.time || null, f.priority]
   );
   const withName = await one(`SELECT t.*, l.name AS lead_name FROM realtor_tasks t LEFT JOIN realtor_leads l ON l.id = t.lead_id WHERE t.id = $1`, [row.id]);
   res.json(realtorTaskRowToJson(withName));
@@ -1162,7 +1166,7 @@ app.get('/api/realtor/home', safe(async (req, res) => {
     WHERE t.realtor_id = $1 AND t.status = 'todo' AND t.due_date IS NOT NULL AND t.due_date <= $2
     ORDER BY t.due_date, t.id DESC LIMIT 8`, [rid, today]);
   const tasksToday = dueRows.map(r => ({
-    id: r.id, title: r.title, due: r.due_date || '', priority: r.priority || 'Medium',
+    id: r.id, title: r.title, due: r.due_date || '', time: r.due_time || '', priority: r.priority || 'Medium',
     leadId: r.lead_id || null, leadName: r.lead_name || '', overdue: !!(r.due_date && r.due_date < today)
   }));
 
