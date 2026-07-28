@@ -137,6 +137,9 @@ const SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_tasks_enabled BOOLEAN DEFAULT TRUE;
   -- Public lead-capture form token (the shareable /apply/<token> intake link).
   ALTER TABLE users ADD COLUMN IF NOT EXISTS capture_token TEXT;
+  -- Email signature (JSON: photo data-URL, name, title, company, phone, email);
+  -- appended to every email the app sends for this user.
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS email_signature TEXT;
   CREATE UNIQUE INDEX IF NOT EXISTS users_capture_token_idx ON users (capture_token);
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -353,7 +356,7 @@ function setSessionCookie(res, sid) {
 // ----- App -----
 const app = express();
 app.set('trust proxy', 1); // behind most PaaS proxies, for secure cookies
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // headroom for the signature photo (base64)
 app.use(cookieParser());
 
 // Baseline security headers.
@@ -783,6 +786,20 @@ app.delete('/api/realtor/leads/:id/notes/:noteId', safe(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// nodemailer message body with the user's signature (mirrors the Gmail path).
+async function smtpMessageFor(userId, to, subject, body) {
+  const sig = await getSignature(userId);
+  const photo = sig ? sigPhoto(sig) : null;
+  const baseHtml = `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
+  if (!sig) return { to, subject, text: body, html: baseHtml };
+  return {
+    to, subject,
+    text: body + '\n\n' + sigText(sig),
+    html: baseHtml + sigHtml(sig, !!photo),
+    attachments: photo ? [{ filename: 'photo.jpg', content: Buffer.from(photo.b64, 'base64'), contentType: photo.mime, cid: 'sigphoto' }] : undefined
+  };
+}
+
 // Send a one-off email to a single person through the user's channel (their
 // connected Gmail first, else shared SMTP). Throws if neither is available.
 async function sendSingleEmail(userId, to, subject, body) {
@@ -795,8 +812,7 @@ async function sendSingleEmail(userId, to, subject, body) {
   }
   const tx = mailer();
   if (tx) {
-    await tx.sendMail({ from: mailFrom(), to, subject, text: body,
-      html: `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
+    await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, to, subject, body)));
     return 'smtp';
   }
   throw new Error('Connect Gmail (or configure SMTP) to send email.');
@@ -1414,15 +1430,82 @@ async function googleStatus(userId) {
   const row = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   return { connected: !!row, email: row ? (row.email || '') : '', configured: googleConfigured() };
 }
+// ----- Email signature (photo + contact block on every outgoing email) -----
+const htmlEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The saved signature for a user, or null when they haven't set one up.
+async function getSignature(userId) {
+  const row = await one('SELECT email_signature FROM users WHERE id = $1', [userId]);
+  if (!row || !row.email_signature) return null;
+  try {
+    const s = JSON.parse(row.email_signature);
+    if (!s || !String(s.name || '').trim()) return null;
+    return s;
+  } catch (e) { return null; }
+}
+function sigText(sig) {
+  return ['--', sig.name, sig.title, sig.company, sig.phone, sig.email]
+    .map(v => String(v || '').trim()).filter(Boolean).join('\n');
+}
+// Email-client-safe table; the photo arrives as an inline (cid) attachment
+// because Gmail strips data: URIs.
+function sigHtml(sig, hasPhoto) {
+  const line = (v, style) => v ? `<div style="${style}">${htmlEsc(v)}</div>` : '';
+  const tel = String(sig.phone || '').replace(/[^\d+]/g, '');
+  return `<table cellpadding="0" cellspacing="0" border="0" style="margin-top:22px;font-family:Arial,Helvetica,sans-serif"><tr>
+    ${hasPhoto ? `<td style="vertical-align:top;padding-right:16px"><img src="cid:sigphoto" width="92" alt="${htmlEsc(sig.name)}" style="display:block;border-radius:8px;width:92px"></td>` : ''}
+    <td style="vertical-align:top;border-left:3px solid #2456C7;padding-left:14px">
+      ${line(sig.name, 'font-size:16px;font-weight:bold;color:#1a1b2e;line-height:1.3')}
+      ${line(sig.title, 'font-size:11.5px;font-weight:bold;letter-spacing:1px;color:#2456C7;margin-top:1px')}
+      ${line(sig.company, 'font-size:13px;color:#444;margin-top:7px')}
+      ${sig.phone ? `<div style="font-size:13px;margin-top:2px"><a href="tel:${tel}" style="color:#444;text-decoration:none">${htmlEsc(sig.phone)}</a></div>` : ''}
+      ${sig.email ? `<div style="font-size:13px;margin-top:1px"><a href="mailto:${htmlEsc(sig.email)}" style="color:#2456C7;text-decoration:none">${htmlEsc(sig.email)}</a></div>` : ''}
+    </td></tr></table>`;
+}
+// Parse a data-URL photo into { mime, b64 }, or null.
+function sigPhoto(sig) {
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String((sig && sig.photo) || ''));
+  return m ? { mime: m[1], b64: m[2] } : null;
+}
+
 // Send one message through the user's Gmail. Throws on failure.
+// The user's signature (if set) is appended: HTML with the inline photo,
+// plus a plain-text fallback part.
 async function sendViaGmail(userId, from, to, subject, body) {
   const token = await getGoogleToken(userId);
   if (!token) throw new Error('Your Google connection expired — reconnect Gmail.');
-  const headers = [
-    `From: ${from}`, `To: ${to}`,
-    `Subject: ${subject}`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"', '', body
-  ].join('\r\n');
-  const raw = Buffer.from(headers).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const sig = await getSignature(userId);
+  const photo = sig ? sigPhoto(sig) : null;
+
+  let mime;
+  if (!sig) {
+    mime = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
+            'Content-Type: text/plain; charset="UTF-8"', '', body].join('\r\n');
+  } else {
+    const text = body + '\n\n' + sigText(sig);
+    const html = `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>` + sigHtml(sig, !!photo);
+    const alt = 'ALT-' + crypto.randomBytes(8).toString('hex');
+    const altPart = [
+      `--${alt}`, 'Content-Type: text/plain; charset="UTF-8"', '', text,
+      `--${alt}`, 'Content-Type: text/html; charset="UTF-8"', '', html,
+      `--${alt}--`
+    ].join('\r\n');
+    if (photo) {
+      const rel = 'REL-' + crypto.randomBytes(8).toString('hex');
+      mime = [
+        `From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
+        `Content-Type: multipart/related; boundary="${rel}"`, '',
+        `--${rel}`, `Content-Type: multipart/alternative; boundary="${alt}"`, '', altPart, '',
+        `--${rel}`, `Content-Type: ${photo.mime}`, 'Content-Transfer-Encoding: base64',
+        'Content-ID: <sigphoto>', 'Content-Disposition: inline; filename="photo.jpg"', '',
+        photo.b64.replace(/(.{76})/g, '$1\r\n'),
+        `--${rel}--`
+      ].join('\r\n');
+    } else {
+      mime = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
+              `Content-Type: multipart/alternative; boundary="${alt}"`, '', altPart].join('\r\n');
+    }
+  }
+  const raw = Buffer.from(mime).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ raw })
@@ -1568,6 +1651,32 @@ app.get('/api/realtor/gcal', safe(async (req, res) => {
     })
     .filter(Boolean);
   res.json({ configured, connected: true, calendarOk: true, events });
+}));
+
+// ----- Signature settings -----
+app.get('/api/realtor/signature', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const sig = await getSignature(req.user.id);
+  if (sig) return res.json(sig);
+  // Sensible starting point for a fresh setup.
+  const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [req.user.id]);
+  res.json({ photo: '', name: req.user.name || '', title: 'REALTOR®', company: '',
+             phone: '', email: (gmail && gmail.email) || req.user.email || '' });
+}));
+
+app.put('/api/realtor/signature', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const b = req.body || {};
+  const f = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
+  const photo = String(b.photo || '');
+  if (photo && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo)) {
+    return res.status(400).json({ error: 'The photo must be a JPEG, PNG, or WebP image.' });
+  }
+  if (photo.length > 700000) return res.status(400).json({ error: 'That photo is too large — pick a smaller one.' });
+  const sig = { photo, name: f(b.name, 120), title: f(b.title, 120), company: f(b.company, 160), phone: f(b.phone, 40), email: f(b.email, 160) };
+  // No name = signature off; store nothing.
+  await q('UPDATE users SET email_signature = $1 WHERE id = $2', [sig.name ? JSON.stringify(sig) : null, req.user.id]);
+  res.json(sig.name ? sig : { photo: '', name: '', title: '', company: '', phone: '', email: '' });
 }));
 
 // Which Google account is connected (for "sending as ..." hints in the UI).
@@ -1823,8 +1932,7 @@ async function sendWeeklyFor(userId, trigger) {
     const text = personalizeEmail(body, r.name);
     try {
       if (via === 'gmail') await sendViaGmail(userId, gmail.email, r.email, subj, text);
-      else await tx.sendMail({ from: mailFrom(), to: r.email, subject: subj, text,
-        html: `<div style="white-space:pre-wrap;font-family:sans-serif">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>` });
+      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text)));
       sent++;
     } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
   }

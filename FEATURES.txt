@@ -125,6 +125,11 @@ CROSS-CUTTING FEATURES
   call queue, and the "who to call" list on Home.
 - ACTIVITY TIMELINE: notes, logged calls, and sent emails all appear on a
   lead's timeline in one place.
+- EMAIL SIGNATURE: set up once in Settings (photo + name, title like
+  REALTOR®, company, phone, email) and every email the app sends ends
+  with it — a styled HTML block with the photo inline, plus a plain-
+  text fallback. Applies to 1:1 emails and the weekly list, via Gmail
+  or SMTP.
 - AI FRESHNESS: the day after each weekly send (send Monday → new draft
   Tuesday), AI writes next week's edition in the same voice with a fresh
   angle, so subscribers never get a repeat. Also on demand via the

@@ -1523,6 +1523,29 @@
             <span style="position:absolute;top:3px;left:${prefs.autoFollowups ? '21px' : '3px'};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .15s" id="auto-knob"></span></button>
         </div>
       </div>
+      <div class="panel p-6 mb-5" style="max-width:560px">
+        <h3 class="text-[15px] font-semibold mb-1">Email signature</h3>
+        <p class="text-[12.5px] text-muted mb-4">Added to the bottom of every email LeadNest sends for you — 1:1 emails and the weekly list. Tip: type ® with Alt+0174 (it's included in the default title).</p>
+        <div class="flex items-start gap-4 mb-3 flex-wrap">
+          <div class="flex flex-col items-center gap-2" style="flex-shrink:0">
+            <img id="sig-photo" class="hidden" style="width:92px;border-radius:10px;display:block" alt="Signature photo">
+            <div id="sig-photo-empty" class="flex items-center justify-center" style="width:92px;height:110px;border:1.5px dashed var(--border-strong);border-radius:10px;color:var(--muted)"><i data-lucide="image-plus"></i></div>
+            <input id="sig-file" type="file" accept="image/*" class="hidden">
+            <button class="btn-ghost" id="sig-upload" style="padding:5px 10px;font-size:12px">Upload photo</button>
+            <button class="btn-ghost hidden" id="sig-photo-rm" style="padding:5px 10px;font-size:12px;color:#C23B3B">Remove</button>
+          </div>
+          <div class="flex flex-col gap-2.5" style="flex:1;min-width:220px">
+            <div class="field"><label class="lbl">Full name</label><input id="sig-name" class="input" placeholder="Lorenco Pergega"></div>
+            <div class="field"><label class="lbl">Title</label><input id="sig-title" class="input" placeholder="REALTOR®"></div>
+            <div class="field"><label class="lbl">Company</label><input id="sig-company" class="input" placeholder="Summit Union Real Estate"></div>
+            <div class="field"><label class="lbl">Phone</label><input id="sig-phone" class="input" placeholder="(586) 265-9141"></div>
+            <div class="field"><label class="lbl">Email</label><input id="sig-email" class="input" placeholder="Listwithlorenco@gmail.com"></div>
+          </div>
+        </div>
+        <div class="text-[11px] font-bold text-muted uppercase tracking-wide mb-1">Preview</div>
+        <div id="sig-preview" class="p-3 rounded-lg mb-3" style="background:var(--surface-2)"></div>
+        <div class="flex items-center gap-3"><button id="sig-save" class="btn-primary"><i data-lucide="check"></i>Save signature</button><span id="sig-msg" class="text-[12.5px] font-medium"></span></div>
+      </div>
       <div class="panel p-6" style="max-width:560px">
         <h3 class="text-[15px] font-semibold mb-1">Change password</h3>
         <p class="text-[12.5px] text-muted mb-4">Update the password you use to sign in.</p>
@@ -1535,6 +1558,65 @@
         </div>
       </div>`;
     icons();
+
+    // ----- Email signature -----
+    let sig = { photo: '', name: '', title: '', company: '', phone: '', email: '' };
+    try { sig = await api('/api/realtor/signature'); } catch (e) {}
+    const sigFields = ['name', 'title', 'company', 'phone', 'email'];
+    sigFields.forEach(k => { $('sig-' + k).value = sig[k] || ''; });
+    function sigRead() {
+      sigFields.forEach(k => { sig[k] = $('sig-' + k).value.trim(); });
+      return sig;
+    }
+    function sigPreview() {
+      const s = sigRead();
+      $('sig-photo').src = s.photo || '';
+      $('sig-photo').classList.toggle('hidden', !s.photo);
+      $('sig-photo-empty').classList.toggle('hidden', !!s.photo);
+      $('sig-photo-rm').classList.toggle('hidden', !s.photo);
+      const line = (v, st) => v ? `<div style="${st}">${esc(v)}</div>` : '';
+      $('sig-preview').innerHTML = `<table cellpadding="0" cellspacing="0" style="font-family:Arial,Helvetica,sans-serif"><tr>
+        ${s.photo ? `<td style="vertical-align:top;padding-right:14px"><img src="${escA(s.photo)}" style="width:76px;border-radius:8px;display:block"></td>` : ''}
+        <td style="vertical-align:top;border-left:3px solid #2456C7;padding-left:12px">
+          ${line(s.name, 'font-size:15px;font-weight:bold')}
+          ${line(s.title, 'font-size:11px;font-weight:bold;letter-spacing:1px;color:#2456C7')}
+          ${line(s.company, 'font-size:12.5px;margin-top:6px')}
+          ${line(s.phone, 'font-size:12.5px;margin-top:2px')}
+          ${line(s.email, 'font-size:12.5px;color:#2456C7')}
+        </td></tr></table>`;
+    }
+    sigPreview();
+    sigFields.forEach(k => $('sig-' + k).addEventListener('input', sigPreview));
+    $('sig-upload').addEventListener('click', () => $('sig-file').click());
+    $('sig-photo-rm').addEventListener('click', () => { sig.photo = ''; sigPreview(); });
+    $('sig-file').addEventListener('change', () => {
+      const file = $('sig-file').files[0];
+      if (!file) return;
+      // Downscale client-side so the stored data-URL stays small.
+      const img = new Image();
+      img.onload = () => {
+        const w = Math.min(240, img.width);
+        const h = Math.round(img.height * (w / img.width));
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        sig.photo = c.toDataURL('image/jpeg', 0.85);
+        URL.revokeObjectURL(img.src);
+        sigPreview();
+      };
+      img.src = URL.createObjectURL(file);
+      $('sig-file').value = '';
+    });
+    $('sig-save').addEventListener('click', async () => {
+      const msg = $('sig-msg'); msg.textContent = ''; msg.style.color = '#C23B3B';
+      const s = sigRead();
+      if (!s.name) { msg.textContent = 'Add at least your name.'; return; }
+      try {
+        await api('/api/realtor/signature', { method: 'PUT', body: JSON.stringify(s) });
+        msg.style.color = '#1B7F4B'; msg.textContent = 'Saved — every email now ends with this.';
+        toast('Signature saved');
+      } catch (e) { msg.textContent = e.message; }
+    });
+
     let on = prefs.autoFollowups;
     $('auto-toggle').addEventListener('click', async () => {
       on = !on;
