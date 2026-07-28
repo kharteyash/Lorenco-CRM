@@ -1113,12 +1113,15 @@ app.patch('/api/realtor/tasks/:id', safe(async (req, res) => {
   if (!title) return res.status(400).json({ error: 'A task is required.' });
   const dueRaw = b.due != null ? String(b.due).trim().slice(0, 10) : cur.due_date;
   const due = (dueRaw && /^\d{4}-\d{2}-\d{2}$/.test(dueRaw)) ? dueRaw : (b.due === '' ? null : cur.due_date);
+  // time: "HH:MM" sets it, "" clears it, absent leaves it alone.
+  const timeRaw = b.time != null ? String(b.time).trim().slice(0, 5) : cur.due_time;
+  const time = (timeRaw && /^\d{2}:\d{2}$/.test(timeRaw)) ? timeRaw : (b.time !== undefined ? null : cur.due_time);
   const priority = REALTOR_TASK_PRIORITIES.includes(String(b.priority || '')) ? b.priority : cur.priority;
   let leadId = cur.lead_id;
   if (b.leadId !== undefined) leadId = await ownRealtorLead(req.user.id, Number.isInteger(b.leadId) ? b.leadId : null);
   await pool.query(
-    `UPDATE realtor_tasks SET title=$1, due_date=$2, priority=$3, status=$4, completed_at=$5, lead_id=$6 WHERE id=$7 AND realtor_id=$8`,
-    [title, due, priority, status, completedAt, leadId, id, req.user.id]
+    `UPDATE realtor_tasks SET title=$1, due_date=$2, due_time=$3, priority=$4, status=$5, completed_at=$6, lead_id=$7 WHERE id=$8 AND realtor_id=$9`,
+    [title, due, time, priority, status, completedAt, leadId, id, req.user.id]
   );
   const row = await one(`SELECT t.*, l.name AS lead_name FROM realtor_tasks t LEFT JOIN realtor_leads l ON l.id = t.lead_id WHERE t.id = $1`, [id]);
   res.json(realtorTaskRowToJson(row));

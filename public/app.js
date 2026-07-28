@@ -223,6 +223,7 @@
         <div class="min-w-0 flex-1"><div class="text-[13px] font-medium truncate">${esc(t.title)}</div>
           <div class="text-[11.5px] ${t.overdue ? 'text-rose-500 font-semibold' : 'text-muted'}">${t.overdue ? 'Overdue · ' : ''}${fmtDate(t.due)}${t.time ? ' · ' + fmtTimeSafe(t.time) : ''}</div></div>
         <span class="badge ${priBadge(t.priority)}">${t.priority}</span>
+        <button class="act" data-home-resched="${t.id}" title="Reschedule"><i data-lucide="calendar-clock"></i></button>
       </div>`).join('') : `<div class="text-[13px] text-muted py-4 text-center">Nothing due. You're all caught up 🎉</div>`;
     const feed = d.activity.length ? d.activity.map(a => `
       <div class="flex items-start gap-3 py-2">
@@ -283,6 +284,10 @@
     $('view').querySelectorAll('[data-done]').forEach(b => b.addEventListener('click', async () => {
       try { await api('/api/realtor/tasks/' + b.dataset.done, { method: 'PATCH', body: JSON.stringify({ status: 'done' }) }); toast('Marked done'); renderHome(); }
       catch (e) { toast(e.message, 'alert-triangle'); }
+    }));
+    $('view').querySelectorAll('[data-home-resched]').forEach(b => b.addEventListener('click', () => {
+      const t = d.tasksToday.find(x => x.id == b.dataset.homeResched);
+      if (t) rescheduleModal(t, renderHome);
     }));
   }
   // Safe time formatter usable before the calendar module's fmtTime is defined at call sites.
@@ -1202,6 +1207,7 @@
       </div>
       ${t.due && t.status === 'todo' && t.due < new Date().toISOString().slice(0, 10) ? '<span class="badge red">Overdue</span>' : ''}
       <span class="badge ${priBadge(t.priority)}">${t.priority}</span>
+      ${t.status === 'todo' ? `<button class="act" data-resched="${t.id}" title="Reschedule"><i data-lucide="calendar-clock"></i></button>` : ''}
       <button class="act" data-del="${t.id}" title="Delete"><i data-lucide="trash-2"></i></button>
     </div>`;
     $('view').innerHTML = `
@@ -1220,6 +1226,27 @@
     $('view').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
       await api('/api/realtor/tasks/' + b.dataset.del, { method: 'DELETE' }); toast('Task deleted'); renderTasks();
     }));
+    $('view').querySelectorAll('[data-resched]').forEach(b => b.addEventListener('click', () => {
+      const t = taskCache.find(x => x.id == b.dataset.resched);
+      if (t) rescheduleModal(t, renderTasks);
+    }));
+  }
+
+  // Move a follow-up to a new date (and optionally a new time).
+  function rescheduleModal(t, after) {
+    openModal('Reschedule follow-up', `
+      <p class="text-[12.5px] text-muted mb-3">${esc(t.title)}</p>
+      <div class="grid-form">
+        <div class="field"><label class="lbl">New date *</label><input class="input" type="date" data-f="due" value="${escA(t.due)}"></div>
+        <div class="field"><label class="lbl">Time (optional)</label><input class="input" type="time" data-f="time" value="${escA(t.time || '')}"></div>
+      </div>`,
+      'Reschedule', async (root) => {
+        const body = collect(root);
+        if (!body.due) throw new Error('Pick a new date.');
+        await api('/api/realtor/tasks/' + t.id, { method: 'PATCH', body: JSON.stringify({ due: body.due, time: body.time || '' }) });
+        toast('Follow-up rescheduled');
+        (after || render)();
+      });
   }
   async function taskModal() {
     let leads = leadCache;
