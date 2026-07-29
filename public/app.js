@@ -484,26 +484,51 @@
       lead ? 'Save changes' : 'Add lead', async (root) => {
         const body = collect(root);
         if (!body.name) throw new Error('A name is required.');
+        if (body.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) throw new Error('That email address doesn\'t look right.');
+        const digits = (body.phone || '').replace(/\D/g, '');
+        if (body.phone && digits.length < 7) throw new Error('That phone number looks too short.');
         // The follow-up picker isn't part of the lead record — it becomes a
         // follow-up task (Follow-ups page + calendar) linked to this lead.
         const followUp = body.followUp; delete body.followUp;
+        if (followUp && new Date(followUp) < new Date()) throw new Error('The follow-up time is in the past — pick a future one.');
+        // Same phone or email as an existing lead? Ask before adding a twin.
+        if (!lead) {
+          const dup = leadCache.find(x =>
+            (body.email && x.email && x.email.toLowerCase() === body.email.toLowerCase()) ||
+            (digits && x.phone && x.phone.replace(/\D/g, '') === digits));
+          if (dup && !confirm(`${dup.name} already has this ${dup.email && body.email && dup.email.toLowerCase() === body.email.toLowerCase() ? 'email' : 'phone number'}. Add as a separate lead anyway?`)) {
+            throw new Error('Not added — looks like a duplicate of ' + dup.name + '.');
+          }
+        }
         let saved;
         if (lead) saved = await api('/api/realtor/leads/' + lead.id, { method: 'PATCH', body: JSON.stringify(body) });
         else saved = await api('/api/realtor/leads', { method: 'POST', body: JSON.stringify(body) });
+        // Best-effort: a follow-up hiccup must not look like a failed save
+        // (retrying the modal would create the lead twice).
+        let followUpMsg = '';
         if (followUp) {
           const [due, time] = followUp.split('T');
-          await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
-            title: 'Follow up with ' + body.name, due, time: time || '', priority: 'Medium',
-            leadId: lead ? lead.id : ((saved && saved.id) || null)
-          }) });
+          try {
+            await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
+              title: 'Follow up with ' + body.name, due, time: time || '', priority: 'Medium',
+              leadId: lead ? lead.id : ((saved && saved.id) || null)
+            }) });
+            followUpMsg = ' · follow-up scheduled';
+          } catch (e) { followUpMsg = ' · follow-up could not be scheduled'; }
         }
-        toast((lead ? 'Lead updated' : 'Lead added') + (followUp ? ' · follow-up scheduled' : ''));
+        toast((lead ? 'Lead updated' : 'Lead added') + followUpMsg);
         render();
       });
+    const root = document.querySelector('.modal');
+    // Scheduling a follow-up in the past makes no sense — floor the picker.
+    const fu = root.querySelector('[data-f="followUp"]');
+    if (fu) {
+      const n = new Date(), p = (x) => String(x).padStart(2, '0');
+      fu.min = `${n.getFullYear()}-${p(n.getMonth() + 1)}-${p(n.getDate())}T${p(n.getHours())}:${p(n.getMinutes())}`;
+    }
     // Sellers don't have buyer finances: hide financing / credit / budget
     // when the intent is Selling (Buying and Both keep them). Values aren't
     // cleared, so flipping the intent back loses nothing.
-    const root = document.querySelector('.modal');
     const intentSel = root.querySelector('[data-f="intent"]');
     const syncBuyerFields = () => {
       const selling = intentSel.value === 'Selling';

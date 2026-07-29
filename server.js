@@ -490,7 +490,11 @@ app.post('/api/change-password', safe(async (req, res) => {
 // credit, intent. Higher = more ready to transact, so call them first.
 function scoreRealtorLead(l) {
   let score = 0; const why = [];
+  // Sellers have no financing/credit to score on (those are buyer fields),
+  // so listing intent itself carries more weight — an ASAP seller is a hot
+  // listing appointment, not a Low-priority lead.
   if (l.intent === 'Both') { score += 10; why.push('Buying & selling'); }
+  else if (l.intent === 'Selling') { score += 15; why.push('Listing lead'); }
   else if (l.intent) { score += 5; why.push(l.intent); }
   const tl = (l.timeline || '').toLowerCase();
   if (tl.includes('asap')) { score += 40; why.push('ASAP'); }
@@ -557,6 +561,12 @@ async function ensureRealtorFollowups(userId) {
     // Rule 1 — brand-new lead, never called.
     if (phone && !lc) {
       if (!autoAt(l.id, 'auto:new-lead')) await insert(l.id, `Call ${l.name} — new lead`, today, 'High', 'auto:new-lead');
+      continue;
+    }
+    // Rule 1b — no phone but an email on file: nudge an email instead, so
+    // email-only leads (e.g. intake-form submissions) never slip through.
+    if (!phone && String(l.email || '').trim() && !lc) {
+      if (!autoAt(l.id, 'auto:new-lead-email')) await insert(l.id, `Email ${l.name} — new lead`, today, 'High', 'auto:new-lead-email');
       continue;
     }
     // Rule 2 — most recent call was a miss; one retry per miss event.
@@ -682,14 +692,24 @@ app.post('/api/realtor/leads/import', safe(async (req, res) => {
   const rows = (req.body || {}).rows;
   if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows to import.' });
   if (rows.length > 5000) return res.status(400).json({ error: 'Too many rows (max 5000 per import).' });
+  // Dedupe on phone/email — against leads already in the book AND within the
+  // file itself, so re-importing the same CSV doesn't double everyone up.
+  const existing = await q('SELECT phone, email FROM realtor_leads WHERE realtor_id = $1', [req.user.id]);
+  const seenEmail = new Set(existing.map(r => String(r.email || '').trim().toLowerCase()).filter(Boolean));
+  const seenPhone = new Set(existing.map(r => String(r.phone || '').replace(/\D/g, '')).filter(Boolean));
   let imported = 0, skipped = 0;
   for (const raw of rows) {
     const f = cleanRealtorLead(raw || {});
     if (!f.name) { skipped++; continue; }
+    const em = f.email.trim().toLowerCase();
+    const ph = f.phone.replace(/\D/g, '');
+    if ((em && seenEmail.has(em)) || (ph && seenPhone.has(ph))) { skipped++; continue; }
+    if (em) seenEmail.add(em);
+    if (ph) seenPhone.add(ph);
     await pool.query(
       `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-      [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source]
+      [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source || 'CSV import']
     );
     imported++;
   }
@@ -1094,7 +1114,7 @@ function cleanRealtorTask(b) {
   return {
     title: s(b.title, 200),
     due: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : '',
-    time: /^\d{2}:\d{2}$/.test(s(b.time, 5)) ? s(b.time, 5) : '',
+    time: /^([01]\d|2[0-3]):[0-5]\d$/.test(s(b.time, 5)) ? s(b.time, 5) : '',
     priority: REALTOR_TASK_PRIORITIES.includes(s(b.priority, 10)) ? s(b.priority, 10) : 'Medium',
     leadId: Number.isInteger(b.leadId) ? b.leadId : null
   };
@@ -1143,7 +1163,7 @@ app.patch('/api/realtor/tasks/:id', safe(async (req, res) => {
   const due = (dueRaw && /^\d{4}-\d{2}-\d{2}$/.test(dueRaw)) ? dueRaw : (b.due === '' ? null : cur.due_date);
   // time: "HH:MM" sets it, "" clears it, absent leaves it alone.
   const timeRaw = b.time != null ? String(b.time).trim().slice(0, 5) : cur.due_time;
-  const time = (timeRaw && /^\d{2}:\d{2}$/.test(timeRaw)) ? timeRaw : (b.time !== undefined ? null : cur.due_time);
+  const time = (timeRaw && /^([01]\d|2[0-3]):[0-5]\d$/.test(timeRaw)) ? timeRaw : (b.time !== undefined ? null : cur.due_time);
   const priority = REALTOR_TASK_PRIORITIES.includes(String(b.priority || '')) ? b.priority : cur.priority;
   let leadId = cur.lead_id;
   if (b.leadId !== undefined) leadId = await ownRealtorLead(req.user.id, Number.isInteger(b.leadId) ? b.leadId : null);
