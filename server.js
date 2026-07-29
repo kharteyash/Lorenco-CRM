@@ -786,6 +786,20 @@ app.delete('/api/realtor/leads/:id/notes/:noteId', safe(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// From header with a human name — "Lorenco Pergega <addr>" instead of the
+// bare address. The signature name wins (it's the user's professional
+// identity); the CRM account name is the fallback.
+async function gmailFromFor(userId, gmailAddr) {
+  const sig = await getSignature(userId);
+  let name = (sig && sig.name) || '';
+  if (!name) {
+    const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
+    name = (u && u.name) || '';
+  }
+  name = name.replace(/[\r\n"<>@]/g, '').trim();
+  return name ? `${name} <${gmailAddr}>` : gmailAddr;
+}
+
 // nodemailer message body with the user's signature (mirrors the Gmail path).
 async function smtpMessageFor(userId, to, subject, body) {
   const sig = await getSignature(userId);
@@ -805,9 +819,7 @@ async function smtpMessageFor(userId, to, subject, body) {
 async function sendSingleEmail(userId, to, subject, body) {
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   if (gmail) {
-    // Bare address on purpose: Gmail then applies the account's own display
-    // name (the user's real Google name) instead of their CRM account name.
-    await sendViaGmail(userId, gmail.email, to, subject, body);
+    await sendViaGmail(userId, await gmailFromFor(userId, gmail.email), to, subject, body);
     return 'gmail';
   }
   const tx = mailer();
@@ -1921,8 +1933,8 @@ async function sendWeeklyFor(userId, trigger) {
   // Pick a channel: connected Gmail first, else SMTP.
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   const tx = mailer();
-  let via = null;
-  if (gmail) { via = 'gmail'; } // bare From address — Gmail applies the account's real display name
+  let via = null, gmailFrom = '';
+  if (gmail) { via = 'gmail'; gmailFrom = await gmailFromFor(userId, gmail.email); }
   else if (tx) { via = 'smtp'; }
   else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
@@ -1931,7 +1943,7 @@ async function sendWeeklyFor(userId, trigger) {
     const subj = personalizeEmail(subject, r.name);
     const text = personalizeEmail(body, r.name);
     try {
-      if (via === 'gmail') await sendViaGmail(userId, gmail.email, r.email, subj, text);
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text);
       else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text)));
       sent++;
     } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
