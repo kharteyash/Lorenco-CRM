@@ -17,3 +17,8 @@ services:
       # Enables secure cookies (the app trusts Render's proxy).
       - key: NODE_ENV
         value: production
+      # Protects GET /api/cron/dispatch (weekly email sender + AI refresh).
+      # Point an external cron (e.g. cron-job.org) at:
+      #   https://YOUR-APP.onrender.com/api/cron/dispatch?key=<this value>
+      - key: CRON_SECRET
+        sync: false
