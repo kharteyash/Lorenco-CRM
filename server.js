@@ -160,6 +160,7 @@ const SCHEMA = `
     budget        TEXT,
     property_type TEXT,
     area          TEXT,
+    address       TEXT,
     zipcode       TEXT,
     financing     TEXT,            -- Pre-approved | Needs a lender | Paying cash | Not sure
     credit_score  TEXT,
@@ -172,6 +173,9 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS realtor_leads_owner ON realtor_leads (realtor_id, id);
   ALTER TABLE realtor_leads ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'New';
   ALTER TABLE realtor_leads ADD COLUMN IF NOT EXISTS source TEXT;
+  ALTER TABLE realtor_leads ADD COLUMN IF NOT EXISTS address TEXT;
+  -- "Just browsing" was renamed to "Nurture" in the timeline dropdown.
+  UPDATE realtor_leads SET timeline = 'Nurture' WHERE timeline = 'Just browsing';
 
   -- A realtor's own saved contacts (their address book, separate from leads).
   CREATE TABLE IF NOT EXISTS realtor_contacts (
@@ -501,7 +505,7 @@ function scoreRealtorLead(l) {
   else if (tl.includes('1-3')) { score += 30; why.push('1-3 months'); }
   else if (tl.includes('3-6')) { score += 20; why.push('3-6 months'); }
   else if (tl.includes('6+')) { score += 10; why.push('6+ months'); }
-  else if (tl.includes('brows')) { score += 0; why.push('Just browsing'); }
+  else if (tl.includes('brows') || tl.includes('nurture')) { score += 0; why.push('Nurture'); }
   const fin = (l.financing || '');
   if (fin === 'Pre-approved') { score += 30; why.push('Pre-approved'); }
   else if (fin === 'Paying cash') { score += 28; why.push('Paying cash'); }
@@ -603,7 +607,7 @@ function realtorLeadRowToJson(r) {
   return {
     id: r.id, name: r.name, phone: r.phone || '', email: r.email || '',
     intent: r.intent || '', timeline: r.timeline || '', budget: r.budget || '',
-    propertyType: r.property_type || '', area: r.area || '', zipcode: r.zipcode || '', financing: r.financing || '',
+    propertyType: r.property_type || '', area: r.area || '', address: r.address || '', zipcode: r.zipcode || '', financing: r.financing || '',
     creditScore: r.credit_score || '', assets: r.assets || '', notes: r.notes || '',
     stage: r.stage || 'New', source: r.source || '', created: r.created_at
   };
@@ -614,7 +618,7 @@ function cleanRealtorLead(b) {
   return {
     name: s(b.name, 120), phone: formatPhone(s(b.phone, 40)), email: s(b.email, 160),
     intent: oneOf(b.intent, REALTOR_LEAD_INTENTS), timeline: s(b.timeline, 60), budget: s(b.budget, 60),
-    propertyType: s(b.propertyType, 60), area: s(b.area, 120), zipcode: s(b.zipcode, 20),
+    propertyType: s(b.propertyType, 60), area: s(b.area, 120), address: s(b.address, 200), zipcode: s(b.zipcode, 20),
     financing: oneOf(b.financing, REALTOR_LEAD_FINANCING), creditScore: s(b.creditScore, 40),
     assets: s(b.assets, 120), notes: s(b.notes, 2000),
     stage: REALTOR_LEAD_STAGES.includes(s(b.stage, 40)) ? s(b.stage, 40) : 'New',
@@ -638,9 +642,9 @@ app.post('/api/realtor/leads', safe(async (req, res) => {
   const f = cleanRealtorLead(req.body || {});
   if (!f.name) return res.status(400).json({ error: 'A name is required.' });
   const row = await one(
-    `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-    [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source]
+    `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source, address)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+    [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source, f.address]
   );
   res.json(realtorLeadRowToJson(row));
 }));
@@ -659,8 +663,8 @@ app.patch('/api/realtor/leads/:id', safe(async (req, res) => {
   const source = (req.body || {}).source !== undefined ? f.source : (cur.source || '');
   const row = await one(
     `UPDATE realtor_leads SET name=$1, phone=$2, email=$3, intent=$4, timeline=$5, budget=$6, property_type=$7,
-       area=$8, financing=$9, notes=$10, credit_score=$11, assets=$12, zipcode=$15, stage=$16, source=$17 WHERE id=$13 AND realtor_id=$14 RETURNING *`,
-    [f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, id, req.user.id, f.zipcode, stage, source]
+       area=$8, financing=$9, notes=$10, credit_score=$11, assets=$12, zipcode=$15, stage=$16, source=$17, address=$18 WHERE id=$13 AND realtor_id=$14 RETURNING *`,
+    [f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, id, req.user.id, f.zipcode, stage, source, f.address]
   );
   res.json(realtorLeadRowToJson(row));
 }));
@@ -707,9 +711,9 @@ app.post('/api/realtor/leads/import', safe(async (req, res) => {
     if (em) seenEmail.add(em);
     if (ph) seenPhone.add(ph);
     await pool.query(
-      `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-      [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source || 'CSV import']
+      `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source, address)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [req.user.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, f.stage, f.source || 'CSV import', f.address]
     );
     imported++;
   }
@@ -760,9 +764,9 @@ app.post('/api/public/leads/:token', safe(async (req, res) => {
   if (!f.name) return res.status(400).json({ error: 'Please enter your name.' });
   if (!f.phone && !f.email) return res.status(400).json({ error: 'Please add a phone number or email so we can reach you.' });
   await pool.query(
-    `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'New',$15)`,
-    [owner.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, 'Intake form']
+    `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source, address)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'New',$15,$16)`,
+    [owner.id, f.name, f.phone, f.email, f.intent, f.timeline, f.budget, f.propertyType, f.area, f.financing, f.notes, f.creditScore, f.assets, f.zipcode, 'Intake form', f.address]
   );
   res.json({ ok: true });
 }));

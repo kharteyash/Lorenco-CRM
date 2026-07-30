@@ -62,7 +62,7 @@
     { id: 'settings', label: 'Settings',     icon: 'settings' }
   ];
 
-  const TIMELINES = ['ASAP', '1-3 months', '3-6 months', '6+ months', 'Just browsing'];
+  const TIMELINES = ['ASAP', '1-3 months', '3-6 months', '6+ months', 'Nurture'];
   const INTENTS = ['Buying', 'Selling', 'Both'];
   const FINANCING = ['Pre-approved', 'Needs a lender', 'Paying cash', 'Not sure'];
   const CREDIT = ['741+', '681-740', '621-680', '581-620', '<580'];
@@ -451,7 +451,7 @@
   // Client-side mirror of the server's readiness scoring (display only).
   function clientScore(l) {
     let s = 0;
-    if (l.intent === 'Both') s += 10; else if (l.intent) s += 5;
+    if (l.intent === 'Both') s += 10; else if (l.intent === 'Selling') s += 15; else if (l.intent) s += 5;
     const tl = (l.timeline || '').toLowerCase();
     if (tl.includes('asap')) s += 40; else if (tl.includes('1-3')) s += 30; else if (tl.includes('3-6')) s += 20; else if (tl.includes('6+')) s += 10;
     const f = l.financing;
@@ -479,6 +479,7 @@
         <div class="field" data-buyer-only><label class="lbl">Budget</label><input class="input" data-f="budget" value="${escA(l.budget)}" placeholder="$400k–$500k"></div>
         <div class="field"><label class="lbl">Property type</label><input class="input" data-f="propertyType" value="${escA(l.propertyType)}" placeholder="Single family"></div>
         <div class="field"><label class="lbl">Area / city</label><input class="input" data-f="area" value="${escA(l.area)}" placeholder="Austin, TX"></div>
+        <div class="field"><label class="lbl">Address</label><input class="input" data-f="address" value="${escA(l.address)}" placeholder="123 Main St"></div>
         <div class="field"><label class="lbl">Zip</label><input class="input" data-f="zipcode" value="${escA(l.zipcode)}" placeholder="78701"></div>
         <div class="field"><label class="lbl">Follow up on</label><input class="input" type="datetime-local" data-f="followUp"></div>
         <div class="field full"><label class="lbl">Notes</label><textarea class="input" data-f="notes" placeholder="Anything worth remembering...">${esc(l.notes)}</textarea></div>
@@ -547,7 +548,7 @@
     const r = clientScore(l);
     const info = [
       ['Intent', l.intent], ['Timeline', l.timeline], ['Financing', l.financing], ['Credit', l.creditScore],
-      ['Budget', l.budget], ['Property', l.propertyType], ['Area', l.area], ['Zip', l.zipcode], ['Assets', l.assets], ['Source', l.source]
+      ['Budget', l.budget], ['Property', l.propertyType], ['Area', l.area], ['Address', l.address], ['Zip', l.zipcode], ['Assets', l.assets], ['Source', l.source]
     ].filter(x => x[1]).map(x => `<div><div class="lbl">${x[0]}</div><div class="text-[13px] font-medium">${esc(x[1])}</div></div>`).join('');
     const timeline = tl.items.length ? tl.items.map(it => {
       if (it.kind === 'call') return `<div class="flex items-start gap-2.5 py-2 border-b border-[var(--border)] last:border-0">
@@ -792,12 +793,12 @@
     } catch (err) { toast(err.message, 'alert-triangle'); }
   }
   function mapLeadRow(row) {
-    const g = (keys) => { for (const k of Object.keys(row)) { const lk = k.toLowerCase().trim(); if (keys.some(x => lk === x || lk.includes(x))) return row[k]; } return ''; };
+    const g = (keys) => { for (const k of Object.keys(row)) { const lk = k.toLowerCase().trim(); if (lk.includes('mail') && !keys.includes('email')) continue; if (keys.some(x => lk === x || lk.includes(x))) return row[k]; } return ''; };
     return {
       name: g(['name', 'full name', 'client']) || [g(['first']), g(['last'])].filter(Boolean).join(' '),
       phone: g(['phone', 'mobile', 'cell']), email: g(['email', 'e-mail']),
       intent: g(['intent']), timeline: g(['timeline']), budget: g(['budget', 'price range']),
-      propertyType: g(['property', 'type']), area: g(['area', 'city', 'location']), zipcode: g(['zip', 'postal']),
+      propertyType: g(['property', 'type']), area: g(['area', 'city', 'location']), address: g(['address', 'street']), zipcode: g(['zip', 'postal']),
       financing: g(['financing', 'finance']), creditScore: g(['credit']), assets: g(['assets']), notes: g(['notes', 'comment'])
     };
   }
