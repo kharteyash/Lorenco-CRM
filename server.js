@@ -241,6 +241,13 @@ const SCHEMA = `
     completed_at TIMESTAMPTZ
   );
   CREATE INDEX IF NOT EXISTS realtor_tasks_owner ON realtor_tasks (realtor_id, id);
+  -- Drop open auto "new lead" nudges that sit next to a follow-up the user
+  -- scheduled themselves for the same lead (they read as duplicates).
+  DELETE FROM realtor_tasks t
+   WHERE t.source IN ('auto:new-lead', 'auto:new-lead-email') AND t.status <> 'done'
+     AND EXISTS (SELECT 1 FROM realtor_tasks m
+                  WHERE m.realtor_id = t.realtor_id AND m.lead_id = t.lead_id AND m.status <> 'done'
+                    AND (m.source IS NULL OR m.source NOT LIKE 'auto:%'));
   -- Optional time of day for a follow-up (HH:MM), so it can sit at the right
   -- hour on the calendar instead of showing as an all-day item.
   ALTER TABLE realtor_tasks ADD COLUMN IF NOT EXISTS due_time TEXT;
@@ -552,6 +559,13 @@ async function ensureRealtorFollowups(userId) {
                             GROUP BY lead_id, source`, [userId]);
   const lastAuto = {}; autoRows.forEach(r => { lastAuto[r.lead_id + '|' + r.source] = r.at; });
   const autoAt = (leadId, source) => lastAuto[leadId + '|' + source];
+  // Leads that already have an open task the user made themselves (e.g. a
+  // follow-up scheduled from the lead form) — the new-lead nudge would be a
+  // duplicate next to it.
+  const manualRows = await q(`SELECT DISTINCT lead_id FROM realtor_tasks
+                              WHERE realtor_id = $1 AND lead_id IS NOT NULL
+                                AND status <> 'done' AND (source IS NULL OR source NOT LIKE 'auto:%')`, [userId]);
+  const hasOwnTask = new Set(manualRows.map(r => r.lead_id));
   const daysSince = (d) => d ? (Date.now() - new Date(d).getTime()) / 864e5 : Infinity;
 
   const insert = (leadId, title, due, priority, source) => pool.query(
@@ -562,15 +576,16 @@ async function ensureRealtorFollowups(userId) {
     const phone = String(l.phone || '').trim();
     const lc = latestCallFor(l);
 
-    // Rule 1 — brand-new lead, never called.
+    // Rule 1 — brand-new lead, never called. Skipped when the user already
+    // scheduled their own follow-up for this lead (no double reminders).
     if (phone && !lc) {
-      if (!autoAt(l.id, 'auto:new-lead')) await insert(l.id, `Call ${l.name} — new lead`, today, 'High', 'auto:new-lead');
+      if (!autoAt(l.id, 'auto:new-lead') && !hasOwnTask.has(l.id)) await insert(l.id, `Call ${l.name} — new lead`, today, 'High', 'auto:new-lead');
       continue;
     }
     // Rule 1b — no phone but an email on file: nudge an email instead, so
     // email-only leads (e.g. intake-form submissions) never slip through.
     if (!phone && String(l.email || '').trim() && !lc) {
-      if (!autoAt(l.id, 'auto:new-lead-email')) await insert(l.id, `Email ${l.name} — new lead`, today, 'High', 'auto:new-lead-email');
+      if (!autoAt(l.id, 'auto:new-lead-email') && !hasOwnTask.has(l.id)) await insert(l.id, `Email ${l.name} — new lead`, today, 'High', 'auto:new-lead-email');
       continue;
     }
     // Rule 2 — most recent call was a miss; one retry per miss event.
