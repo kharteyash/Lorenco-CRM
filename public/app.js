@@ -424,15 +424,15 @@
     const rows = leadCache.filter(l => !ql || (l.name + ' ' + l.email + ' ' + l.phone + ' ' + l.area).toLowerCase().includes(ql));
     $('lead-count').textContent = rows.length + ' of ' + leadCache.length;
     if (!rows.length) { t.innerHTML = `<tbody><tr><td>${emptyState('user-plus', leadCache.length ? 'No matches' : 'No leads yet', leadCache.length ? 'Try a different search.' : 'Add your first lead to get started.')}</td></tr></tbody>`; icons(); return; }
-    t.innerHTML = `<thead><tr><th>Name</th><th>Timeline</th><th>Financing</th><th>Readiness</th><th>Contact</th><th></th></tr></thead>
+    t.innerHTML = `<thead><tr><th>Name</th><th>Timeline</th><th>Intent</th><th>Readiness</th><th>Contact</th><th></th></tr></thead>
       <tbody>${rows.map(l => {
         const r = clientScore(l);
         return `<tr>
           <td><div class="flex items-center gap-2.5"><div class="avatar sm">${initials(l.name)}</div>
             <div class="min-w-0"><div class="font-semibold text-[13px] truncate" data-lead-tip="${l.id}">${esc(l.name)}</div>
-            <div class="text-[11.5px] text-muted truncate">${esc([l.intent, l.area].filter(Boolean).join(' · ')) || '—'}</div></div></div></td>
+            <div class="text-[11.5px] text-muted truncate">${l.area ? esc(l.area) : '—'}</div></div></div></td>
           <td>${l.timeline ? esc(l.timeline) : '<span class="text-muted">—</span>'}</td>
-          <td>${l.financing ? esc(l.financing) : '<span class="text-muted">—</span>'}</td>
+          <td>${l.intent ? esc(l.intent) : '<span class="text-muted">—</span>'}</td>
           <td><span class="badge ${priBadge(r.priority)}">${r.priority}</span></td>
           <td>${contactActions(l.name, l.phone, l.email, l.id)}</td>
           <td><div class="flex items-center gap-1 justify-end">
