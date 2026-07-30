@@ -437,6 +437,7 @@
           <td>${contactActions(l.name, l.phone, l.email, l.id)}</td>
           <td><div class="flex items-center gap-1 justify-end">
             <button class="act" data-log="${l.id}" title="Log call"><i data-lucide="phone-call"></i></button>
+            <button class="act" data-edit-lead="${l.id}" title="Edit"><i data-lucide="pencil"></i></button>
             <button class="act" data-view="${l.id}" title="Open"><i data-lucide="panel-right-open"></i></button>
           </div></td>
         </tr>`;
@@ -444,6 +445,7 @@
     icons();
     t.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => leadDrawer(+b.dataset.view)));
     t.querySelectorAll('[data-log]').forEach(b => b.addEventListener('click', () => { const l = leadCache.find(x => x.id == b.dataset.log); logCallModal(l); }));
+    t.querySelectorAll('[data-edit-lead]').forEach(b => b.addEventListener('click', () => { const l = leadCache.find(x => x.id == b.dataset.editLead); if (l) leadModal(l); }));
   }
 
   // Client-side mirror of the server's readiness scoring (display only).
