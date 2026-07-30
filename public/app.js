@@ -512,8 +512,10 @@
         if (followUp) {
           const [due, time] = followUp.split('T');
           try {
+            // The follow-up inherits the lead's readiness, so the priority
+            // badge reflects the lead rather than a flat default.
             await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
-              title: 'Follow up with ' + body.name, due, time: time || '', priority: 'Medium',
+              title: 'Follow up with ' + body.name, due, time: time || '', priority: clientScore(saved || body).priority,
               leadId: lead ? lead.id : ((saved && saved.id) || null)
             }) });
             followUpMsg = ' · follow-up scheduled';
