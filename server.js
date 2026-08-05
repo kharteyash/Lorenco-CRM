@@ -631,7 +631,9 @@ function cleanRealtorLead(b) {
   const s = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
   const oneOf = (v, list) => { const t = s(v, 40); return list.includes(t) ? t : ''; };
   return {
-    name: s(b.name, 120), phone: formatPhone(s(b.phone, 40)), email: s(b.email, 160),
+    name: s(b.name, 120), phone: formatPhone(s(b.phone, 40)),
+    // A lead can carry several emails; normalize any separator to ", ".
+    email: s(b.email, 400).split(/[,;\s]+/).filter(Boolean).join(', '),
     intent: oneOf(b.intent, REALTOR_LEAD_INTENTS), timeline: s(b.timeline, 60), budget: s(b.budget, 60),
     propertyType: s(b.propertyType, 60), area: s(b.area, 120), address: s(b.address, 200), zipcode: s(b.zipcode, 20),
     financing: oneOf(b.financing, REALTOR_LEAD_FINANCING), creditScore: s(b.creditScore, 40),
@@ -714,16 +716,17 @@ app.post('/api/realtor/leads/import', safe(async (req, res) => {
   // Dedupe on phone/email — against leads already in the book AND within the
   // file itself, so re-importing the same CSV doesn't double everyone up.
   const existing = await q('SELECT phone, email FROM realtor_leads WHERE realtor_id = $1', [req.user.id]);
-  const seenEmail = new Set(existing.map(r => String(r.email || '').trim().toLowerCase()).filter(Boolean));
+  const splitEms = (v) => String(v || '').toLowerCase().split(/[,;\s]+/).filter(Boolean);
+  const seenEmail = new Set(existing.flatMap(r => splitEms(r.email)));
   const seenPhone = new Set(existing.map(r => String(r.phone || '').replace(/\D/g, '')).filter(Boolean));
   let imported = 0, skipped = 0;
   for (const raw of rows) {
     const f = cleanRealtorLead(raw || {});
     if (!f.name) { skipped++; continue; }
-    const em = f.email.trim().toLowerCase();
+    const ems = splitEms(f.email);
     const ph = f.phone.replace(/\D/g, '');
-    if ((em && seenEmail.has(em)) || (ph && seenPhone.has(ph))) { skipped++; continue; }
-    if (em) seenEmail.add(em);
+    if (ems.some(e => seenEmail.has(e)) || (ph && seenPhone.has(ph))) { skipped++; continue; }
+    ems.forEach(e => seenEmail.add(e));
     if (ph) seenPhone.add(ph);
     await pool.query(
       `INSERT INTO realtor_leads (realtor_id, name, phone, email, intent, timeline, budget, property_type, area, financing, notes, credit_score, assets, zipcode, stage, source, address)

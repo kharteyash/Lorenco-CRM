@@ -34,7 +34,9 @@ PIPELINE  (kanban board)
 
 LEADS
 - Your book of business: add, edit, search, and delete leads.
-- Rich fields: contact info, intent (buying/selling/both), timeline,
+- Rich fields: contact info (a lead can have several email addresses —
+  "+ Add another email" on the form; emails to the lead go to all of
+  them), intent (buying/selling/both), timeline,
   budget, property type, area/zip, financing, credit, notes, stage,
   and source. Selling leads hide the buyer-only fields (financing,
   credit, budget).

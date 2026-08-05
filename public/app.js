@@ -465,11 +465,18 @@
   function leadModal(lead) {
     const l = lead || {};
     const sel = (name, opts, val) => `<select class="input" data-f="${name}"><option value="">—</option>${opts.map(o => `<option ${val === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+    // A lead can have several emails (stored comma-separated) — one input each.
+    const emVals = String(l.email || '').split(/[,;\s]+/).filter(Boolean);
+    const emRow = (v, removable) => `<div class="flex items-center gap-1.5 em-row">
+      <input class="input em-input" type="email" value="${escA(v)}" placeholder="name@email.com">
+      ${removable ? '<button type="button" class="act em-del" title="Remove this email"><i data-lucide="x"></i></button>' : ''}</div>`;
     openModal(lead ? 'Edit lead' : 'Add lead', `
       <div class="grid-form">
         <div class="field"><label class="lbl">Name *</label><input class="input" data-f="name" value="${escA(l.name)}" placeholder="Full name"></div>
         <div class="field"><label class="lbl">Phone</label><input class="input" data-f="phone" value="${escA(l.phone)}" placeholder="(555) 123-4567"></div>
-        <div class="field"><label class="lbl">Email</label><input class="input" data-f="email" value="${escA(l.email)}" placeholder="name@email.com"></div>
+        <div class="field"><label class="lbl">Email</label>
+          <div id="em-list" class="flex flex-col gap-1.5">${(emVals.length ? emVals : ['']).map((v, i) => emRow(v, i > 0)).join('')}</div>
+          <button type="button" id="em-add" class="text-[12px] font-semibold self-start mt-1" style="color:var(--accent)">+ Add another email</button></div>
         <div class="field"><label class="lbl">Stage</label><select class="input" data-f="stage">${STAGES.map(o => `<option ${(l.stage || 'New') === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
         <div class="field"><label class="lbl">Source</label><input class="input" data-f="source" value="${escA(l.source)}" placeholder="Zillow, referral, open house..."></div>
         <div class="field"><label class="lbl">Intent</label>${sel('intent', INTENTS, l.intent)}</div>
@@ -487,7 +494,10 @@
       lead ? 'Save changes' : 'Add lead', async (root) => {
         const body = collect(root);
         if (!body.name) throw new Error('A name is required.');
-        if (body.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) throw new Error('That email address doesn\'t look right.');
+        const emails = [...root.querySelectorAll('.em-input')].map(i => i.value.trim()).filter(Boolean);
+        const badEm = emails.find(e => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+        if (badEm) throw new Error(`"${badEm}" doesn't look like a valid email address.`);
+        body.email = emails.join(', ');
         const digits = (body.phone || '').replace(/\D/g, '');
         if (body.phone && digits.length < 7) throw new Error('That phone number looks too short.');
         // The follow-up picker isn't part of the lead record — it becomes a
@@ -496,10 +506,10 @@
         if (followUp && new Date(followUp) < new Date()) throw new Error('The follow-up time is in the past — pick a future one.');
         // Same phone or email as an existing lead? Ask before adding a twin.
         if (!lead) {
-          const dup = leadCache.find(x =>
-            (body.email && x.email && x.email.toLowerCase() === body.email.toLowerCase()) ||
-            (digits && x.phone && x.phone.replace(/\D/g, '') === digits));
-          if (dup && !confirm(`${dup.name} already has this ${dup.email && body.email && dup.email.toLowerCase() === body.email.toLowerCase() ? 'email' : 'phone number'}. Add as a separate lead anyway?`)) {
+          const myEms = emails.map(e => e.toLowerCase());
+          const sharesEmail = (x) => x.email && x.email.toLowerCase().split(/[,;\s]+/).some(e => myEms.includes(e));
+          const dup = leadCache.find(x => sharesEmail(x) || (digits && x.phone && x.phone.replace(/\D/g, '') === digits));
+          if (dup && !confirm(`${dup.name} already has this ${sharesEmail(dup) ? 'email' : 'phone number'}. Add as a separate lead anyway?`)) {
             throw new Error('Not added — looks like a duplicate of ' + dup.name + '.');
           }
         }
@@ -525,6 +535,15 @@
         render();
       });
     const root = document.querySelector('.modal');
+    const emList = root.querySelector('#em-list');
+    root.querySelector('#em-add').addEventListener('click', () => {
+      const d = document.createElement('div');
+      d.className = 'flex items-center gap-1.5 em-row';
+      d.innerHTML = `<input class="input em-input" type="email" placeholder="name@email.com">
+        <button type="button" class="act em-del" title="Remove this email"><i data-lucide="x"></i></button>`;
+      emList.appendChild(d); icons(); d.querySelector('input').focus();
+    });
+    emList.addEventListener('click', (e) => { const b = e.target.closest('.em-del'); if (b) b.closest('.em-row').remove(); });
     // Scheduling a follow-up in the past makes no sense — floor the picker.
     const fu = root.querySelector('[data-f="followUp"]');
     if (fu) {
