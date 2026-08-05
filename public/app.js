@@ -1242,23 +1242,37 @@
   // ---------- Follow-ups (tasks) ----------
   let taskCache = [];
   async function renderTasks() {
-    try { taskCache = await api('/api/realtor/tasks'); } catch (e) { return errView(e); }
+    try {
+      [taskCache, leadCache] = await Promise.all([api('/api/realtor/tasks'), api('/api/realtor/leads')]);
+    } catch (e) { return errView(e); }
     dueBadge = taskCache.filter(t => t.status === 'todo' && t.due && t.due <= new Date().toISOString().slice(0, 10)).length;
     renderShell();
     const open = taskCache.filter(t => t.status === 'todo');
     const done = taskCache.filter(t => t.status === 'done');
-    const row = (t) => `<div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0">
+    const row = (t) => {
+      // What this follow-up is about: the lead's situation + their latest note.
+      const about = [t.leadStage, t.leadIntent, t.leadTimeline].filter(Boolean).join(' · ');
+      const note = (t.leadNote || '').replace(/\s+/g, ' ').trim();
+      const leadBit = t.leadName
+        ? `<button type="button" class="font-semibold" data-open-lead="${t.leadId}" style="color:var(--accent)">${esc(t.leadName)}</button>`
+        : '';
+      return `<div class="flex items-center gap-3 py-2.5 border-b border-[var(--border)] last:border-0">
       <button class="act" data-toggle="${t.id}" data-status="${t.status}" title="${t.status === 'done' ? 'Reopen' : 'Mark done'}">
         <i data-lucide="${t.status === 'done' ? 'check-circle-2' : 'circle'}" ${t.status === 'done' ? 'style="color:#1B7F4B"' : ''}></i></button>
       <div class="min-w-0 flex-1">
         <div class="text-[13px] font-medium truncate ${t.status === 'done' ? 'line-through text-muted' : ''}">${esc(t.title)}</div>
-        <div class="text-[11.5px] text-muted">${[t.leadName, t.due ? fmtDate(t.due) + (t.time ? ' ' + fmtTimeSafe(t.time) : '') : '', t.auto ? 'auto' : ''].filter(Boolean).join(' · ')}</div>
+        <div class="text-[11.5px] text-muted">${[leadBit, t.due ? fmtDate(t.due) + (t.time ? ' ' + fmtTimeSafe(t.time) : '') : '', t.auto ? 'auto' : ''].filter(Boolean).join(' · ')}</div>
+        ${t.status === 'todo' && (about || note) ? `<div class="text-[11.5px] text-muted truncate mt-0.5">
+          ${about ? `<span class="font-medium" style="color:var(--text)">${esc(about)}</span>` : ''}
+          ${about && note ? ' — ' : ''}${note ? `<span style="font-style:italic">“${esc(note.slice(0, 120))}${note.length > 120 ? '…' : ''}”</span>` : ''}
+        </div>` : ''}
       </div>
       ${t.due && t.status === 'todo' && t.due < new Date().toISOString().slice(0, 10) ? '<span class="badge red">Overdue</span>' : ''}
       <span class="badge ${priBadge(t.priority)}">${t.priority}</span>
       ${t.status === 'todo' ? `<button class="act" data-resched="${t.id}" title="Reschedule"><i data-lucide="calendar-clock"></i></button>` : ''}
       <button class="act" data-del="${t.id}" title="Delete"><i data-lucide="trash-2"></i></button>
     </div>`;
+    };
     $('view').innerHTML = `
       ${pageHead('Follow-ups', 'Your task list — plus auto-reminders from your activity.', `<button class="btn-primary" id="tk-add"><i data-lucide="plus"></i>Add task</button>`)}
       <div class="panel p-4 mb-4">
@@ -1279,6 +1293,7 @@
       const t = taskCache.find(x => x.id == b.dataset.resched);
       if (t) rescheduleModal(t, renderTasks);
     }));
+    $('view').querySelectorAll('[data-open-lead]').forEach(b => b.addEventListener('click', () => leadDrawer(+b.dataset.openLead)));
   }
 
   // Move a follow-up to a new date (and optionally a new time).

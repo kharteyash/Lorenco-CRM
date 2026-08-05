@@ -1125,6 +1125,8 @@ const REALTOR_TASK_PRIORITIES = ['High', 'Medium', 'Low'];
 function realtorTaskRowToJson(r) {
   return {
     id: r.id, leadId: r.lead_id || null, leadName: r.lead_name || '',
+    leadIntent: r.lead_intent || '', leadTimeline: r.lead_timeline || '',
+    leadStage: r.lead_stage || '', leadNote: r.lead_note || '',
     title: r.title, due: r.due_date || '', time: r.due_time || '', priority: r.priority || 'Medium',
     status: r.status || 'todo', created: r.created_at, completedAt: r.completed_at || null,
     auto: !!(r.source && r.source.indexOf('auto') === 0)
@@ -1146,8 +1148,14 @@ app.get('/api/realtor/tasks', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
   try { await ensureRealtorFollowups(req.user.id); } catch (e) { console.error('auto follow-ups:', e); }
   const rows = await q(`
-    SELECT t.*, l.name AS lead_name
-    FROM realtor_tasks t LEFT JOIN realtor_leads l ON l.id = t.lead_id
+    SELECT t.*, l.name AS lead_name, l.intent AS lead_intent, l.timeline AS lead_timeline,
+           l.stage AS lead_stage, n.body AS lead_note
+    FROM realtor_tasks t
+    LEFT JOIN realtor_leads l ON l.id = t.lead_id
+    LEFT JOIN LATERAL (
+      SELECT body FROM realtor_lead_notes
+      WHERE lead_id = t.lead_id AND realtor_id = t.realtor_id
+      ORDER BY created_at DESC LIMIT 1) n ON true
     WHERE t.realtor_id = $1
     ORDER BY (t.status = 'done'), (t.due_date IS NULL), t.due_date, t.id DESC`, [req.user.id]);
   res.json(rows.map(realtorTaskRowToJson));
