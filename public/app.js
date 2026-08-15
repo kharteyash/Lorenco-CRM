@@ -503,7 +503,7 @@
         // The follow-up picker isn't part of the lead record — it becomes a
         // follow-up task (Follow-ups page + calendar) linked to this lead.
         const followUp = body.followUp; delete body.followUp;
-        if (followUp && new Date(followUp) < new Date()) throw new Error('The follow-up time is in the past — pick a future one.');
+        if (followUp && followUp !== fuOrig && new Date(followUp) < new Date()) throw new Error('The follow-up time is in the past — pick a future one.');
         // Same phone or email as an existing lead? Ask before adding a twin.
         if (!lead) {
           const myEms = emails.map(e => e.toLowerCase());
@@ -519,16 +519,23 @@
         // Best-effort: a follow-up hiccup must not look like a failed save
         // (retrying the modal would create the lead twice).
         let followUpMsg = '';
-        if (followUp) {
+        if (followUp && followUp !== fuOrig) {
           const [due, time] = followUp.split('T');
           try {
-            // The follow-up inherits the lead's readiness, so the priority
-            // badge reflects the lead rather than a flat default.
-            await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
-              title: 'Follow up with ' + body.name, due, time: time || '', priority: clientScore(saved || body).priority,
-              leadId: lead ? lead.id : ((saved && saved.id) || null)
-            }) });
-            followUpMsg = ' · follow-up scheduled';
+            if (fuTask) {
+              // The lead already has this follow-up scheduled — move it
+              // instead of stacking a second one.
+              await api('/api/realtor/tasks/' + fuTask.id, { method: 'PATCH', body: JSON.stringify({ due, time: time || '' }) });
+              followUpMsg = ' · follow-up moved';
+            } else {
+              // The follow-up inherits the lead's readiness, so the priority
+              // badge reflects the lead rather than a flat default.
+              await api('/api/realtor/tasks', { method: 'POST', body: JSON.stringify({
+                title: 'Follow up with ' + body.name, due, time: time || '', priority: clientScore(saved || body).priority,
+                leadId: lead ? lead.id : ((saved && saved.id) || null)
+              }) });
+              followUpMsg = ' · follow-up scheduled';
+            }
           } catch (e) { followUpMsg = ' · follow-up could not be scheduled'; }
         }
         toast((lead ? 'Lead updated' : 'Lead added') + followUpMsg);
@@ -549,6 +556,15 @@
     if (fu) {
       const n = new Date(), p = (x) => String(x).padStart(2, '0');
       fu.min = `${n.getFullYear()}-${p(n.getMonth() + 1)}-${p(n.getDate())}T${p(n.getHours())}:${p(n.getMinutes())}`;
+    }
+    // When editing, show the lead's next open follow-up in the picker; saving
+    // a changed date moves that task rather than creating a duplicate.
+    let fuTask = null, fuOrig = '';
+    if (lead && fu) {
+      api('/api/realtor/tasks').then(ts => {
+        fuTask = ts.find(t => t.leadId === lead.id && t.status === 'todo' && t.due) || null;
+        if (fuTask) { fuOrig = fuTask.due + 'T' + (fuTask.time || '09:00'); fu.value = fuOrig; }
+      }).catch(() => {});
     }
     // Sellers don't have buyer-shopping fields: hide financing / credit /
     // budget / area / zip when the intent is Selling — their property lives
