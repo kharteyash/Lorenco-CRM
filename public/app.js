@@ -1273,12 +1273,29 @@
       <button class="act" data-del="${t.id}" title="Delete"><i data-lucide="trash-2"></i></button>
     </div>`;
     };
+    // One box per month (tasks arrive due-date ascending, undated last), each
+    // month keeping its own color year-round.
+    const MONTH_HUES = [215, 350, 25, 150, 265, 190, 45, 320, 95, 5, 175, 285]; // Jan..Dec
+    const monthColor = (k) => k === 'none' ? '#8a8fa3' : `hsl(${MONTH_HUES[(+k.slice(5, 7) || 1) - 1]}, 62%, 44%)`;
+    const monthLabel = (k) => k === 'none' ? 'No date' : new Date(k + '-01T12:00:00').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    const groups = [], byMonth = {};
+    for (const t of open) {
+      const k = t.due ? t.due.slice(0, 7) : 'none';
+      if (!byMonth[k]) { byMonth[k] = []; groups.push(k); }
+      byMonth[k].push(t);
+    }
+    const monthBox = (k) => {
+      const col = monthColor(k);
+      return `<div class="panel p-4 mb-4" style="border-top:3px solid ${col};background:color-mix(in srgb, ${col} 4%, var(--surface))">
+        <h3 class="text-[14px] font-bold mb-1 flex items-center gap-2">
+          <span style="width:10px;height:10px;border-radius:3px;background:${col};flex:none"></span>
+          <span style="color:${col}">${monthLabel(k)}</span> <span class="text-muted font-medium">(${byMonth[k].length})</span></h3>
+        ${byMonth[k].map(row).join('')}
+      </div>`;
+    };
     $('view').innerHTML = `
       ${pageHead('Follow-ups', 'Your task list — plus auto-reminders from your activity.', `<button class="btn-primary" id="tk-add"><i data-lucide="plus"></i>Add task</button>`)}
-      <div class="panel p-4 mb-4">
-        <h3 class="text-[14px] font-bold mb-1">Open <span class="text-muted font-medium">(${open.length})</span></h3>
-        ${open.length ? open.map(row).join('') : `<div class="text-[13px] text-muted py-6 text-center">Nothing open. 🎉</div>`}
-      </div>
+      ${groups.length ? groups.map(monthBox).join('') : `<div class="panel p-4 mb-4"><div class="text-[13px] text-muted py-6 text-center">Nothing open. 🎉</div></div>`}
       ${done.length ? `<div class="panel p-4"><h3 class="text-[14px] font-bold mb-1">Done <span class="text-muted font-medium">(${done.length})</span></h3>${done.slice(0, 30).map(row).join('')}</div>` : ''}`;
     icons();
     $('tk-add').addEventListener('click', () => taskModal());
