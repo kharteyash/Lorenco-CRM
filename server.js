@@ -859,14 +859,18 @@ async function smtpMessageFor(userId, to, subject, body) {
 // Send a one-off email to a single person through the user's channel (their
 // connected Gmail first, else shared SMTP). Throws if neither is available.
 async function sendSingleEmail(userId, to, subject, body) {
+  // Every 1:1 send is blind-copied to the sender, so they see in their own
+  // inbox exactly what went out.
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   if (gmail) {
-    await sendViaGmail(userId, await gmailFromFor(userId, gmail.email), to, subject, body);
+    await sendViaGmail(userId, await gmailFromFor(userId, gmail.email), to, subject, body, gmail.email);
     return 'gmail';
   }
   const tx = mailer();
   if (tx) {
-    await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, to, subject, body)));
+    const u = await one('SELECT email FROM users WHERE id = $1', [userId]);
+    await tx.sendMail(Object.assign({ from: mailFrom(), bcc: (u && u.email) || undefined },
+      await smtpMessageFor(userId, to, subject, body)));
     return 'smtp';
   }
   throw new Error('Connect Gmail (or configure SMTP) to send email.');
@@ -1532,16 +1536,16 @@ function sigPhoto(sig) {
 // Send one message through the user's Gmail. Throws on failure.
 // The user's signature (if set) is appended: HTML with the inline photo,
 // plus a plain-text fallback part.
-async function sendViaGmail(userId, from, to, subject, body) {
+async function sendViaGmail(userId, from, to, subject, body, bcc) {
   const token = await getGoogleToken(userId);
   if (!token) throw new Error('Your Google connection expired — reconnect Gmail.');
   const sig = await getSignature(userId);
   const photo = sig ? sigPhoto(sig) : null;
+  const head = [`From: ${from}`, `To: ${to}`, ...(bcc ? [`Bcc: ${bcc}`] : []), `Subject: ${subject}`, 'MIME-Version: 1.0'];
 
   let mime;
   if (!sig) {
-    mime = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
-            'Content-Type: text/plain; charset="UTF-8"', '', body].join('\r\n');
+    mime = [...head, 'Content-Type: text/plain; charset="UTF-8"', '', body].join('\r\n');
   } else {
     const text = body + '\n\n' + sigText(sig);
     const html = `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>` + sigHtml(sig, !!photo);
@@ -1554,7 +1558,7 @@ async function sendViaGmail(userId, from, to, subject, body) {
     if (photo) {
       const rel = 'REL-' + crypto.randomBytes(8).toString('hex');
       mime = [
-        `From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
+        ...head,
         `Content-Type: multipart/related; boundary="${rel}"`, '',
         `--${rel}`, `Content-Type: multipart/alternative; boundary="${alt}"`, '', altPart, '',
         `--${rel}`, `Content-Type: ${photo.mime}`, 'Content-Transfer-Encoding: base64',
@@ -1563,8 +1567,7 @@ async function sendViaGmail(userId, from, to, subject, body) {
         `--${rel}--`
       ].join('\r\n');
     } else {
-      mime = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
-              `Content-Type: multipart/alternative; boundary="${alt}"`, '', altPart].join('\r\n');
+      mime = [...head, `Content-Type: multipart/alternative; boundary="${alt}"`, '', altPart].join('\r\n');
     }
   }
   const raw = Buffer.from(mime).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -1998,6 +2001,18 @@ async function sendWeeklyFor(userId, trigger) {
       sent++;
     } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
   }
+  // One "[Copy]" to the sender so they see exactly what the list received
+  // (not counted in the send stats; a failure here never fails the blast).
+  try {
+    const u = await one('SELECT name, email FROM users WHERE id = $1', [userId]);
+    const selfTo = gmail ? gmail.email : (u && u.email);
+    if (selfTo) {
+      const subj = '[Copy] ' + personalizeEmail(subject, (u && u.name) || '');
+      const text = personalizeEmail(body, (u && u.name) || '');
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, selfTo, subj, text);
+      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text)));
+    }
+  } catch (e) { console.error('self copy failed:', e.message); }
   await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger)
                     VALUES ($1,$2,$3,$4,$5,$6)`, [userId, subject, recips.length, sent, failed, trigger || 'manual']);
   return { sent, failed, recipients: recips.length, via };
