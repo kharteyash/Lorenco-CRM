@@ -485,9 +485,9 @@
         <div class="field" data-buyer-only><label class="lbl">Credit score</label>${sel('creditScore', CREDIT, l.creditScore)}</div>
         <div class="field" data-buyer-only><label class="lbl">Budget</label><input class="input" data-f="budget" value="${escA(l.budget)}" placeholder="$400k–$500k"></div>
         <div class="field"><label class="lbl">Property type</label><input class="input" data-f="propertyType" value="${escA(l.propertyType)}" placeholder="Single family"></div>
-        <div class="field"><label class="lbl">Area / city</label><input class="input" data-f="area" value="${escA(l.area)}" placeholder="Austin, TX"></div>
+        <div class="field" data-buyer-only><label class="lbl">Area / city</label><input class="input" data-f="area" value="${escA(l.area)}" placeholder="Austin, TX"></div>
         <div class="field"><label class="lbl">Address</label><input class="input" data-f="address" value="${escA(l.address)}" placeholder="123 Main St"></div>
-        <div class="field"><label class="lbl">Zip</label><input class="input" data-f="zipcode" value="${escA(l.zipcode)}" placeholder="78701"></div>
+        <div class="field" data-buyer-only><label class="lbl">Zip</label><input class="input" data-f="zipcode" value="${escA(l.zipcode)}" placeholder="78701"></div>
         <div class="field"><label class="lbl">Follow up on</label><input class="input" type="datetime-local" data-f="followUp"></div>
         <div class="field full"><label class="lbl">Notes</label><textarea class="input" data-f="notes" placeholder="Anything worth remembering...">${esc(l.notes)}</textarea></div>
       </div>`,
@@ -550,9 +550,10 @@
       const n = new Date(), p = (x) => String(x).padStart(2, '0');
       fu.min = `${n.getFullYear()}-${p(n.getMonth() + 1)}-${p(n.getDate())}T${p(n.getHours())}:${p(n.getMinutes())}`;
     }
-    // Sellers don't have buyer finances: hide financing / credit / budget
-    // when the intent is Selling (Buying and Both keep them). Values aren't
-    // cleared, so flipping the intent back loses nothing.
+    // Sellers don't have buyer-shopping fields: hide financing / credit /
+    // budget / area / zip when the intent is Selling — their property lives
+    // in Address (Buying and Both keep everything). Values aren't cleared,
+    // so flipping the intent back loses nothing.
     const intentSel = root.querySelector('[data-f="intent"]');
     const syncBuyerFields = () => {
       const selling = intentSel.value === 'Selling';
