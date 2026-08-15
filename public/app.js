@@ -1241,14 +1241,13 @@
 
   // ---------- Follow-ups (tasks) ----------
   let taskCache = [];
+  let taskQuery = '';
   async function renderTasks() {
     try {
       [taskCache, leadCache] = await Promise.all([api('/api/realtor/tasks'), api('/api/realtor/leads')]);
     } catch (e) { return errView(e); }
     dueBadge = taskCache.filter(t => t.status === 'todo' && t.due && t.due <= new Date().toISOString().slice(0, 10)).length;
     renderShell();
-    const open = taskCache.filter(t => t.status === 'todo');
-    const done = taskCache.filter(t => t.status === 'done');
     const row = (t) => {
       // What this follow-up is about: the lead's situation + their latest note.
       const about = [t.leadStage, t.leadIntent, t.leadTimeline].filter(Boolean).join(' · ');
@@ -1278,39 +1277,62 @@
     const MONTH_HUES = [215, 350, 25, 150, 265, 190, 45, 320, 95, 5, 175, 285]; // Jan..Dec
     const monthColor = (k) => k === 'none' ? '#8a8fa3' : `hsl(${MONTH_HUES[(+k.slice(5, 7) || 1) - 1]}, 62%, 44%)`;
     const monthLabel = (k) => k === 'none' ? 'No date' : new Date(k + '-01T12:00:00').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-    const groups = [], byMonth = {};
-    for (const t of open) {
-      const k = t.due ? t.due.slice(0, 7) : 'none';
-      if (!byMonth[k]) { byMonth[k] = []; groups.push(k); }
-      byMonth[k].push(t);
-    }
-    const monthBox = (k) => {
-      const col = monthColor(k);
-      return `<div class="panel p-4 mb-4" style="border-top:3px solid ${col};background:color-mix(in srgb, ${col} 4%, var(--surface))">
-        <h3 class="text-[14px] font-bold mb-1 flex items-center gap-2">
-          <span style="width:10px;height:10px;border-radius:3px;background:${col};flex:none"></span>
-          <span style="color:${col}">${monthLabel(k)}</span> <span class="text-muted font-medium">(${byMonth[k].length})</span></h3>
-        ${byMonth[k].map(row).join('')}
-      </div>`;
-    };
     $('view').innerHTML = `
       ${pageHead('Follow-ups', 'Your task list — plus auto-reminders from your activity.', `<button class="btn-primary" id="tk-add"><i data-lucide="plus"></i>Add task</button>`)}
-      ${groups.length ? groups.map(monthBox).join('') : `<div class="panel p-4 mb-4"><div class="text-[13px] text-muted py-6 text-center">Nothing open. 🎉</div></div>`}
-      ${done.length ? `<div class="panel p-4"><h3 class="text-[14px] font-bold mb-1">Done <span class="text-muted font-medium">(${done.length})</span></h3>${done.slice(0, 30).map(row).join('')}</div>` : ''}`;
+      <div class="panel p-3 mb-4 flex items-center gap-2">
+        <div class="relative flex-1 max-w-[320px]"><i data-lucide="search" class="absolute" style="left:10px;top:9px;width:16px;height:16px;color:var(--muted)"></i>
+        <input id="tk-search" class="input" style="padding-left:32px" placeholder="Search follow-ups..." value="${escA(taskQuery)}"></div>
+        <span class="text-[12px] text-muted ml-auto" id="tk-count"></span>
+      </div>
+      <div id="tk-list"></div>`;
     icons();
     $('tk-add').addEventListener('click', () => taskModal());
-    $('view').querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', async () => {
-      const next = b.dataset.status === 'done' ? 'todo' : 'done';
-      await api('/api/realtor/tasks/' + b.dataset.toggle, { method: 'PATCH', body: JSON.stringify({ status: next }) }); renderTasks();
-    }));
-    $('view').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
-      await api('/api/realtor/tasks/' + b.dataset.del, { method: 'DELETE' }); toast('Task deleted'); renderTasks();
-    }));
-    $('view').querySelectorAll('[data-resched]').forEach(b => b.addEventListener('click', () => {
-      const t = taskCache.find(x => x.id == b.dataset.resched);
-      if (t) rescheduleModal(t, renderTasks);
-    }));
-    $('view').querySelectorAll('[data-open-lead]').forEach(b => b.addEventListener('click', () => leadDrawer(+b.dataset.openLead)));
+    $('tk-search').addEventListener('input', e => { taskQuery = e.target.value; drawTasks(); });
+    drawTasks();
+
+    function drawTasks() {
+      const q = taskQuery.trim().toLowerCase();
+      // Search across everything a follow-up shows: its title, lead, the
+      // lead's context + note, priority, and the due month ("august").
+      const hit = (t) => !q || [t.title, t.leadName, t.leadNote, t.leadStage, t.leadIntent, t.leadTimeline,
+        t.priority, t.due, t.due ? monthLabel(t.due.slice(0, 7)) : ''].join(' ').toLowerCase().includes(q);
+      const shown = taskCache.filter(hit);
+      const open = shown.filter(t => t.status === 'todo');
+      const done = shown.filter(t => t.status === 'done');
+      $('tk-count').textContent = q ? (open.length + done.length) + ' of ' + taskCache.length : '';
+      const groups = [], byMonth = {};
+      for (const t of open) {
+        const k = t.due ? t.due.slice(0, 7) : 'none';
+        if (!byMonth[k]) { byMonth[k] = []; groups.push(k); }
+        byMonth[k].push(t);
+      }
+      const monthBox = (k) => {
+        const col = monthColor(k);
+        return `<div class="panel p-4 mb-4" style="border-top:3px solid ${col};background:color-mix(in srgb, ${col} 4%, var(--surface))">
+          <h3 class="text-[14px] font-bold mb-1 flex items-center gap-2">
+            <span style="width:10px;height:10px;border-radius:3px;background:${col};flex:none"></span>
+            <span style="color:${col}">${monthLabel(k)}</span> <span class="text-muted font-medium">(${byMonth[k].length})</span></h3>
+          ${byMonth[k].map(row).join('')}
+        </div>`;
+      };
+      const list = $('tk-list');
+      list.innerHTML = `
+        ${groups.length ? groups.map(monthBox).join('') : `<div class="panel p-4 mb-4"><div class="text-[13px] text-muted py-6 text-center">${q ? 'No follow-ups match your search.' : 'Nothing open. 🎉'}</div></div>`}
+        ${done.length ? `<div class="panel p-4"><h3 class="text-[14px] font-bold mb-1">Done <span class="text-muted font-medium">(${done.length})</span></h3>${done.slice(0, 30).map(row).join('')}</div>` : ''}`;
+      icons();
+      list.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', async () => {
+        const next = b.dataset.status === 'done' ? 'todo' : 'done';
+        await api('/api/realtor/tasks/' + b.dataset.toggle, { method: 'PATCH', body: JSON.stringify({ status: next }) }); renderTasks();
+      }));
+      list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+        await api('/api/realtor/tasks/' + b.dataset.del, { method: 'DELETE' }); toast('Task deleted'); renderTasks();
+      }));
+      list.querySelectorAll('[data-resched]').forEach(b => b.addEventListener('click', () => {
+        const t = taskCache.find(x => x.id == b.dataset.resched);
+        if (t) rescheduleModal(t, renderTasks);
+      }));
+      list.querySelectorAll('[data-open-lead]').forEach(b => b.addEventListener('click', () => leadDrawer(+b.dataset.openLead)));
+    }
   }
 
   // Move a follow-up to a new date (and optionally a new time).
