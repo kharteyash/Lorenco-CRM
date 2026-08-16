@@ -1362,6 +1362,25 @@ app.get('/api/realtor/reports', safe(async (req, res) => {
   });
 }));
 
+// Merge lead-source spellings ("Circle Prospect", "CIrcle Prospect", ...)
+// into one canonical name, across leads and past clients. "Unknown" in the
+// list means leads with no source at all.
+app.post('/api/realtor/sources/merge', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const b = req.body || {};
+  const into = String(b.into || '').trim().slice(0, 60);
+  const from = Array.isArray(b.from)
+    ? b.from.map(x => String(x == null ? '' : x).trim().slice(0, 60)).filter(Boolean).slice(0, 100) : [];
+  if (!from.length) return res.status(400).json({ error: 'Pick at least one source to merge.' });
+  if (!into) return res.status(400).json({ error: 'Give the merged source a name.' });
+  const cond = from.includes('Unknown')
+    ? `(btrim(coalesce(source,'')) = ANY($3) OR btrim(coalesce(source,'')) = '')`
+    : `btrim(coalesce(source,'')) = ANY($3)`;
+  const r1 = await pool.query(`UPDATE realtor_leads SET source = $1 WHERE realtor_id = $2 AND ${cond}`, [into, req.user.id, from]);
+  const r2 = await pool.query(`UPDATE realtor_clients SET source = $1 WHERE realtor_id = $2 AND ${cond}`, [into, req.user.id, from]);
+  res.json({ ok: true, leads: r1.rowCount, clients: r2.rowCount });
+}));
+
 // ===================================================================
 // Appointments / calendar
 // ===================================================================

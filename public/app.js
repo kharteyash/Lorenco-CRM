@@ -1619,7 +1619,10 @@
           <div class="text-[12px] text-muted mt-3 pt-3 border-t border-[var(--border)]">All-time closed volume: <b>${money(d.totals.volume)}</b> across ${d.closedTotal} deal${d.closedTotal === 1 ? '' : 's'}.</div>
         </div>
         <div class="panel p-5">
-          <h3 class="text-[14px] font-bold mb-1">Lead sources</h3>
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="text-[14px] font-bold">Lead sources</h3>
+            ${d.sources.length > 1 ? `<button type="button" id="src-merge" class="flex items-center gap-1 text-[12px] font-semibold" style="color:var(--accent)"><i data-lucide="merge" style="width:14px;height:14px"></i>Merge sources</button>` : ''}
+          </div>
           <p class="text-[12px] text-muted mb-3">Which channels bring leads — and which actually close.</p>
           <div style="overflow-x:auto"><table class="tbl">
             <thead><tr><th>Source</th><th>Leads</th><th>Closed</th><th>Conv.</th><th>Volume</th></tr></thead>
@@ -1627,6 +1630,39 @@
         </div>
       </div>`;
     icons();
+    const mergeBtn = $('src-merge');
+    if (mergeBtn) mergeBtn.addEventListener('click', () => mergeSourcesModal(d.sources));
+  }
+
+  // Tidy up source spellings: tick the variants, name the survivor, merge.
+  function mergeSourcesModal(sources) {
+    openModal('Merge lead sources', `
+      <p class="text-[12.5px] text-muted mb-3">Tick the spellings that mean the same thing, then type the one name they should all become. Every lead (and past client) with a ticked source gets the new name.</p>
+      <div class="flex flex-col mb-3" style="max-height:260px;overflow-y:auto">
+        ${sources.map(s => `<label class="flex items-center gap-2 text-[13px] py-1.5 border-b border-[var(--border)] last:border-0" style="cursor:pointer">
+          <input type="checkbox" class="ms-src" value="${escA(s.source)}">
+          <span class="font-medium">${esc(s.source)}</span>
+          <span class="text-muted text-[11.5px] ml-auto">${s.leads} lead${s.leads === 1 ? '' : 's'}${s.closed ? ' · ' + s.closed + ' closed' : ''}</span></label>`).join('')}
+      </div>
+      <div class="field"><label class="lbl">Merge into (final name)</label>
+        <input class="input" id="ms-into" list="ms-names" placeholder="e.g. Circle Prospecting">
+        <datalist id="ms-names">${sources.map(s => `<option value="${escA(s.source)}">`).join('')}</datalist></div>`,
+      'Merge', async (root) => {
+        const from = [...root.querySelectorAll('.ms-src:checked')].map(c => c.value);
+        const into = root.querySelector('#ms-into').value.trim();
+        if (!from.length) throw new Error('Tick at least one source to merge.');
+        if (!into) throw new Error('Type the name they should merge into.');
+        const r = await api('/api/realtor/sources/merge', { method: 'POST', body: JSON.stringify({ from, into }) });
+        toast(`Merged into "${into}" — ${r.leads} lead${r.leads === 1 ? '' : 's'} updated`);
+        renderReports();
+      });
+    // Ticking the first box suggests it as the final name (editable).
+    const root = document.querySelector('.modal');
+    root.addEventListener('change', (e) => {
+      if (!e.target.classList.contains('ms-src')) return;
+      const into = root.querySelector('#ms-into');
+      if (e.target.checked && !into.value.trim()) into.value = e.target.value;
+    });
   }
 
   // ---------- Settings ----------
