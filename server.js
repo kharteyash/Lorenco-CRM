@@ -307,6 +307,7 @@ const SCHEMA = `
   -- Which send (last_run_date) the AI freshness pass already rewrote the
   -- email after, so each edition is only regenerated once.
   ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS refreshed_for TEXT;
+  ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS topic_idx INTEGER;
 
   -- Per-user connected Google account (for sending weekly email as themselves
   -- via the Gmail API). Tokens may be stored encrypted (see TOKEN_ENC_KEY).
@@ -1919,28 +1920,64 @@ async function aiComplete(prompt) {
   throw new Error('Every AI model failed — check the API keys / balances.');
 }
 
-// Write next week's edition of the user's weekly email, in the same voice,
-// and save it. The greeting keeps the {{name}} token so personalization works.
+// The weekly-email playbook (from "Seller Email Topics"): 16 categories × 10
+// subtopics. Every generated edition takes the next subtopic in order, so
+// subscribers see no repeats until all 160 have gone out.
+const SELLER_TOPIC_GROUPS = [
+  ['Curb Appeal', ['Keep the lawn mowed and edged', 'Trim bushes and trees away from windows', 'Rake leaves and clear debris', 'Power wash the driveway and walkway', 'Touch up chipped exterior paint', 'Clean and de-fog windows', 'Repaint or replace the front door', 'Add fresh mulch to flower beds', 'Fix or replace house numbers', 'Update the mailbox if worn']],
+  ['Interior Maintenance', ["Repaint walls if it's been 5-10 years", 'Fix cracked caulk around trim and tubs', 'Patch and sand nail holes', 'Wipe down doors and light switches', 'Fix squeaky floors', 'Replace burnt-out lightbulbs', 'Tighten loose cabinet handles', 'Clean grout and re-caulk showers', 'Remove clutter from closets', 'Deep clean carpets']],
+  ['Kitchen Readiness', ['Clear countertops of small appliances', 'Fix leaky faucets', 'Replace outdated cabinet hardware', 'Clean inside the oven and fridge', 'Repair loose cabinet doors', 'Update lighting fixtures', 'Deep clean tile and backsplash', 'Fix running or slow-draining sinks', 'Remove strong odors before showings', 'Organize pantry shelves']],
+  ['Bathroom Readiness', ['Re-caulk tubs and showers', 'Replace worn toilet seats', 'Fix running toilets', 'Update old faucets', 'Clean grout lines', 'Replace cracked or chipped tile', 'Add fresh towels for showings', 'Fix ventilation fans', 'Remove mold or mildew', 'Declutter vanity counters']],
+  ['HVAC & Systems', ['Replace the AC filter', 'Schedule a furnace tune-up', 'Clean out dryer vents', 'Test smoke and CO detectors', 'Flush the water heater', 'Check for HVAC leaks or noise', 'Clean condenser coils outside', 'Service the garage door opener', 'Test all outlets and switches', 'Replace old thermostats']],
+  ['Roof & Structure', ['Check for missing or curling shingles', 'Clean out gutters and downspouts', 'Look for signs of roof leaks', 'Inspect the chimney and flashing', 'Check the attic for ventilation issues', 'Look for foundation cracks', 'Check basement for moisture', 'Inspect fencing for damage', 'Repair cracked driveway or walkway', 'Check deck/porch for loose boards']],
+  ['Staging & First Impressions', ['Depersonalize — remove family photos', 'Declutter every room by 30%', 'Rearrange furniture for flow', 'Add a fresh coat of neutral paint', 'Open blinds for natural light', 'Add mirrors to brighten small rooms', 'Set the table for a lived-in feel', 'Keep countertops nearly empty', 'Add fresh flowers or greenery', 'Remove excess furniture from rooms']],
+  ['Smell & Cleanliness', ['Eliminate pet odors before showings', 'Take out trash before every showing', 'Deep clean carpets and rugs', 'Avoid strong artificial air fresheners', 'Clean laundry area and remove piles', 'Wipe down baseboards', 'Clean ceiling fans and vents', 'Wash windows inside and out', 'Freshen up with light baking or brewed coffee before showings', 'Empty and clean the garbage disposal']],
+  ['Garage & Storage', ['Organize and declutter the garage', 'Sweep and clean the garage floor', 'Fix a broken garage door', 'Label or bin storage items', 'Clear out the attic', 'Organize the basement', 'Remove excess boxes from closets', 'Fix garage door sensors', 'Sweep out cobwebs', 'Store seasonal items out of sight']],
+  ['Paperwork & Prep for Sale', ['Gather permits for renovations', 'Pull together warranty documents', 'Get a pre-listing inspection', "Know your home's recent comps", 'Understand current market timing', 'Prepare a list of updates/upgrades', 'Get HOA documents ready if applicable', 'Have utility average costs on hand', 'Know your mortgage payoff amount', 'Have a moving/closing timeline in mind']],
+  ['Market Updates', ['Average days on market this month', 'Median sale price trends', 'Buyer demand vs. inventory levels', 'How local rates affect buyer budgets', 'Multiple-offer trends in the area', 'Home value changes year over year', 'New construction impact on resale homes', 'Best time of year to list', 'How local schools affect buyer demand', 'Recently sold comps nearby']],
+  ['Timing Insight', ["Why spring isn't always the best time to sell", 'How days on market affects final sale price', 'What happens when a home sits too long', 'Seasonal buyer behavior shifts', 'How life events dictate ideal timing', 'Why pricing right the first time matters most', 'How mortgage rate shifts affect buyer urgency', 'Holiday season selling myths', 'School year timing considerations for families', 'How long the closing process really takes']],
+  ['Local Community & Businesses', ['New restaurant or shop openings nearby', 'Local events worth mentioning', 'Park and recreation updates', 'School district highlights', 'Community development or road projects', 'Local farmers markets or seasonal events', 'New businesses moving into the area', 'Neighborhood safety/walkability notes', 'Local real estate market "pulse"', 'Fun local history or trivia']],
+  ['For Sale By Owner Risks', ['Pricing mistakes FSBO sellers commonly make', 'Legal exposure without an agent', 'Missing out on the full buyer pool (MLS)', 'Negotiation pitfalls without representation', 'Time and stress cost of doing it alone', 'Common paperwork/disclosure mistakes', 'Underestimating marketing needs', 'Vetting buyers without an agent', 'Appraisal and inspection surprises', 'Why most FSBO homes eventually list with an agent']],
+  ['Expired Listing Insight', ['Common reasons listings expire', 'How pricing strategy affects results', 'What "market fatigue" does to a listing', 'Marketing gaps that cause a listing to stall', 'Why photos/staging matter more than people think', 'Re-listing at the right price point', 'Timing a relist for maximum exposure', 'What buyers think when they see "expired"', "How to reset a listing's momentum", 'Questions to ask before re-listing with a new agent']],
+  ['Emotional Readiness', ["How to know you're really ready to sell", 'Letting go of a home with memories', 'Balancing emotion with market logic', 'How to prepare mentally for showings', 'Handling lowball offers without taking it personally', 'What to expect emotionally during negotiations', 'Preparing for the final walk-through', 'How to separate house value from sentimental value', 'Managing family disagreements about selling', 'Why having a guide (agent) reduces selling stress']]
+];
+const SELLER_TOPICS = SELLER_TOPIC_GROUPS.flatMap(([cat, list]) => list.map(topic => ({ cat, topic })));
+
+// Write next week's edition of the user's weekly email — the next subtopic
+// from the playbook, in the fixed format (subject = the subtopic, two short
+// paragraphs, a CTA tied to that subtopic) — and save it. The greeting keeps
+// the {{name}} token so personalization works.
 async function regenerateWeeklyEmail(userId) {
   const s = await loadEmailSettings(userId);
   const subject = s.subject || DEFAULT_SUBJECT;
   const body = s.body || DEFAULT_BODY;
+  const u = await one('SELECT name FROM users WHERE id = $1', [userId]);
+  const agent = ((u && u.name) || 'your agent').trim();
+  const idx = (Number.isInteger(s.topic_idx) && s.topic_idx >= 0 ? s.topic_idx : 0) % SELLER_TOPICS.length;
+  const t = SELLER_TOPICS[idx];
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   const text = await aiComplete(
-`You write the short weekly check-in email a real-estate agent sends to their mailing list.
+`You write the weekly seller-focused email a Michigan real-estate agent sends to homeowners on their prospecting list (circle prospecting, expired listings, FSBO leads).
 Today's date is ${today} — keep any seasonal references accurate to that.
 
-This week's edition (already sent):
+This week's assigned topic (category: ${t.cat}): "${t.topic}"
+
+Format rules — follow them exactly:
+- Subject line = the topic itself, short and direct (you may polish the wording slightly).
+- The body must start with: Hi {{name}},   (keep {{name}} exactly as written — it becomes the recipient's first name)
+- After the greeting: exactly 2 short paragraphs expanding on the topic with practical, concrete advice a homeowner can act on.
+- End with ONE call to action tied to THIS specific topic (not generic) — pick the most fitting angle: reply for a free estimate or a trusted-pro referral, reply for a free home value check, reply with questions, or call/text ${agent} directly.
+- Then sign off with only:
+Best,
+${agent}
+- Do NOT add contact info, a company name, or a signature block after the sign-off — the app appends the full signature automatically.
+- Keep the content general to local Michigan — never name a specific city, township, or neighborhood. If the topic is about local events or businesses, keep it broadly applicable and invite them to reply for this week's local picks. Never invent statistics, prices, addresses, events, or listings.
+- Plain text only, no markdown. Under 150 words total.
+
+For voice reference, the previous edition was:
 Subject: ${subject}
 Body:
 ${body}
-
-Write NEXT week's edition. Rules:
-- Same voice and the same sign-off name as the current email.
-- A fresh angle so subscribers never get a repeat (rotate between: a practical homeowner tip, a general market observation, a seasonal note, a friendly hello). Do not reuse this week's wording.
-- Plain text only, no markdown. Under 130 words.
-- The body must start with: Hi {{name}},   (keep {{name}} exactly as written — it becomes the recipient's first name)
-- Never invent specific statistics, prices, addresses, or listings.
 
 Answer with ONLY a JSON object, no other text: {"subject": "...", "body": "..."}`);
   const m = text.match(/\{[\s\S]*\}/);
@@ -1951,18 +1988,23 @@ Answer with ONLY a JSON object, no other text: {"subject": "...", "body": "..."}
   let newBody = String(out.body || '').trim().slice(0, 4000);
   if (!newSubject || !newBody) throw new Error('The AI reply was missing a subject or body.');
   if (!/\{\{\s*name\s*\}\}/i.test(newBody)) newBody = 'Hi {{name}},\n\n' + newBody;
-  await q('UPDATE email_settings SET subject = $1, body = $2, updated_at = now() WHERE user_id = $3',
-    [newSubject, newBody, userId]);
-  return { subject: newSubject, body: newBody };
+  // The sign-off is part of the format; add it if the model stopped at the CTA.
+  if (!/(^|\n)\s*(best|warm regards|talk soon|cheers)\b/i.test(newBody)) newBody += `\n\nBest,\n${agent}`;
+  await q('UPDATE email_settings SET subject = $1, body = $2, topic_idx = $3, updated_at = now() WHERE user_id = $4',
+    [newSubject, newBody, idx + 1, userId]);
+  return { subject: newSubject, body: newBody, topic: t.topic, category: t.cat };
 }
 
-const DEFAULT_SUBJECT = 'A quick note from your agent';
+// The starter template is topic #1 of the playbook, in the standard format
+// (subject = the subtopic, two short paragraphs, a CTA tied to the topic).
+const DEFAULT_SUBJECT = 'Keep the lawn mowed and edged';
 const DEFAULT_BODY = `Hi {{name}},
 
-Just checking in with this week's update. If you're thinking about buying or
-selling — or know someone who is — I'd love to help.
+Buyers form an opinion before they ever reach the front door, and the lawn is the first thing they see. A freshly mowed yard with clean edges along the driveway and walkways signals a home that's been cared for — inside and out.
 
-Reply anytime; I'm always happy to talk.
+If selling is anywhere on your radar, keep the grass on a weekly cut through the season and edge every other mow. It costs almost nothing and quietly raises what buyers think your home is worth.
+
+Curious what your home could sell for as it sits today? Reply for a free home value check — no obligation.
 
 Best,
 Your agent`;
@@ -1978,8 +2020,8 @@ const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frida
 async function loadEmailSettings(userId) {
   let s = await one('SELECT * FROM email_settings WHERE user_id = $1', [userId]);
   if (!s) {
-    s = await one(`INSERT INTO email_settings (user_id, subject, body, enabled, send_day)
-                   VALUES ($1, $2, $3, FALSE, 1) RETURNING *`, [userId, DEFAULT_SUBJECT, DEFAULT_BODY]);
+    s = await one(`INSERT INTO email_settings (user_id, subject, body, enabled, send_day, topic_idx)
+                   VALUES ($1, $2, $3, FALSE, 1, 1) RETURNING *`, [userId, DEFAULT_SUBJECT, DEFAULT_BODY]);
   }
   return s;
 }
