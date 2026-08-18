@@ -692,7 +692,13 @@
     api('/api/google/status').then(s => {
       const el = root.querySelector('#em-from');
       if (!el) return; // modal already closed
-      if (s.connected) {
+      if (s.connected && s.healthy === false) {
+        el.innerHTML = `<span style="color:#C0392B">Your Gmail connection is broken — </span>
+          <button type="button" class="font-semibold" id="em-connect" style="color:var(--accent)">reconnect your Google account</button>
+          <span style="color:#C0392B"> before sending.</span>`;
+        const btn = root.querySelector('#em-connect');
+        if (btn) btn.addEventListener('click', () => { location.href = '/api/google/connect?from=' + active; });
+      } else if (s.connected) {
         el.innerHTML = `Sends as <b>${escA(s.email || 'your Gmail')}</b> to <b>${escA(target.email)}</b>${isLead ? ' and logs it on the timeline' : ''}.
           <span class="text-muted">Wrong account? Switch it in Auto Emails.</span>`;
       } else if (s.configured) {
@@ -1401,7 +1407,14 @@
     const s = emailData.settings, wd = emailData.weekdays, gmail = emailData.gmail;
 
     // Gmail connection card — top of the section.
-    const gmailCard = gmail.connected ? `
+    const gmailCard = gmail.connected && gmail.healthy === false ? `
+      <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap" style="border-color:#E8887A">
+        <div class="stat-icon badge red" style="border-radius:11px"><i data-lucide="mail-x"></i></div>
+        <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Gmail connection broken — emails can't send</div>
+          <div class="text-[12px] text-muted truncate">Google no longer accepts the saved sign-in for ${esc(gmail.email || 'your account')}. Reconnect to fix sending.</div></div>
+        <a class="btn-primary" href="/api/google/connect?from=emails"><i data-lucide="refresh-cw"></i>Reconnect Gmail</a>
+      </div>`
+      : gmail.connected ? `
       <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap">
         <div class="stat-icon badge green" style="border-radius:11px"><i data-lucide="mail-check"></i></div>
         <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Gmail connected</div>
@@ -1443,7 +1456,8 @@
       ${emailData.history.map(h => `<div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0">
         <div class="stat-icon badge ${h.failed ? 'amber' : 'green'}" style="width:30px;height:30px;border-radius:8px"><i data-lucide="send" style="width:14px;height:14px"></i></div>
         <div class="min-w-0 flex-1"><div class="text-[12.5px] font-medium truncate">${esc(h.subject)}</div>
-          <div class="text-[11.5px] text-muted">${h.sent}/${h.recipients} sent${h.failed ? ' · ' + h.failed + ' failed' : ''} · ${h.trigger}</div></div>
+          <div class="text-[11.5px] text-muted">${h.sent}/${h.recipients} sent${h.failed ? ' · ' + h.failed + ' failed' : ''} · ${h.trigger}</div>
+          ${h.error ? `<div class="text-[11.5px] font-medium" style="color:#C0392B">${esc(h.error)}</div>` : ''}</div>
         <div class="text-[11px] text-muted">${fmtWhen(h.at)}</div></div>`).join('')}</div>` : '';
 
     $('view').innerHTML = `

@@ -331,6 +331,7 @@ const SCHEMA = `
     created_at  TIMESTAMPTZ DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS email_sends_owner ON email_sends (user_id, id);
+  ALTER TABLE email_sends ADD COLUMN IF NOT EXISTS error TEXT;
 `;
 
 // Periodically clear expired sessions.
@@ -1514,7 +1515,12 @@ async function getGoogleToken(userId) {
 }
 async function googleStatus(userId) {
   const row = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
-  return { connected: !!row, email: row ? (row.email || '') : '', configured: googleConfigured() };
+  if (!row) return { connected: false, healthy: false, email: '', configured: googleConfigured() };
+  // "Connected" isn't enough — prove the token still works (refreshing it if
+  // needed), so the UI can say "reconnect" the moment Google revokes access.
+  let healthy = true;
+  try { healthy = !!(await getGoogleToken(userId)); } catch (e) { healthy = false; }
+  return { connected: true, healthy, email: row.email || '', configured: googleConfigured() };
 }
 // ----- Email signature (photo + contact block on every outgoing email) -----
 const htmlEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -2052,7 +2058,7 @@ async function sendWeeklyFor(userId, trigger) {
   else if (tx) { via = 'smtp'; }
   else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
-  let sent = 0, failed = 0;
+  let sent = 0, failed = 0, firstErr = '';
   for (const r of recips) {
     const subj = personalizeEmail(subject, r.name);
     const text = personalizeEmail(body, r.name);
@@ -2060,7 +2066,11 @@ async function sendWeeklyFor(userId, trigger) {
       if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text);
       else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text)));
       sent++;
-    } catch (e) { console.error('email send failed to', r.email, e.message); failed++; }
+    } catch (e) {
+      console.error('email send failed to', r.email, e.message);
+      failed++;
+      if (!firstErr) firstErr = String(e.message || 'send failed').slice(0, 300);
+    }
   }
   // One "[Copy]" to the sender so they see exactly what the list received
   // (not counted in the send stats; a failure here never fails the blast).
@@ -2074,8 +2084,11 @@ async function sendWeeklyFor(userId, trigger) {
       else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text)));
     }
   } catch (e) { console.error('self copy failed:', e.message); }
-  await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger)
-                    VALUES ($1,$2,$3,$4,$5,$6)`, [userId, subject, recips.length, sent, failed, trigger || 'manual']);
+  await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger, error)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [userId, subject, recips.length, sent, failed, trigger || 'manual', firstErr || null]);
+  // When literally nothing went out, surface the reason instead of "sent 0".
+  if (!sent && failed) return { sent, failed, recipients: recips.length, via, error: firstErr || 'Every send failed.' };
   return { sent, failed, recipients: recips.length, via };
 }
 
@@ -2083,7 +2096,7 @@ app.get('/api/realtor/emails', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
   const recipients = await q('SELECT id, email, name FROM email_recipients WHERE user_id = $1 ORDER BY lower(email)', [req.user.id]);
   const settings = emailSettingsJson(await loadEmailSettings(req.user.id));
-  const history = await q('SELECT subject, recipients, sent, failed, trigger, created_at FROM email_sends WHERE user_id = $1 ORDER BY id DESC LIMIT 10', [req.user.id]);
+  const history = await q('SELECT subject, recipients, sent, failed, trigger, error, created_at FROM email_sends WHERE user_id = $1 ORDER BY id DESC LIMIT 10', [req.user.id]);
   const gmail = await googleStatus(req.user.id);
   res.json({
     recipients: recipients.map(r => ({ id: r.id, email: r.email, name: r.name || '' })),
@@ -2093,7 +2106,7 @@ app.get('/api/realtor/emails', safe(async (req, res) => {
     ai: aiConfigured(),
     // Sending works if Gmail is connected OR SMTP is set up.
     canSend: gmail.connected || emailConfigured(),
-    history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, at: h.created_at }))
+    history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, error: h.error || '', at: h.created_at }))
   });
 }));
 
