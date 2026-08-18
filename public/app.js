@@ -1459,7 +1459,8 @@
             <input id="em-name" class="input" placeholder="Name (optional)" style="width:120px">
             <button class="btn-primary" id="em-add"><i data-lucide="plus"></i></button>
           </div>
-          <div class="text-[11.5px] text-muted mb-3">Tip: paste several addresses separated by commas to add them all.</div>
+          <div class="text-[11.5px] text-muted mb-2">Tip: paste several addresses separated by commas to add them all.</div>
+          <button class="btn-ghost w-full justify-center mb-3" id="em-from-leads"><i data-lucide="users"></i>Add my leads to the list</button>
           ${recipRows}
         </div>
         <div class="panel p-4">
@@ -1516,6 +1517,14 @@
     $('view').querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', async () => {
       await api('/api/realtor/emails/recipients/' + b.dataset.rm, { method: 'DELETE' }); toast('Removed'); renderEmails();
     }));
+    // Pull every lead that has an email onto the mailing list (deduped).
+    $('em-from-leads').addEventListener('click', async () => {
+      try {
+        const r = await api('/api/realtor/emails/recipients/from-leads', { method: 'POST' });
+        toast(r.added ? `Added ${r.added} from your leads${r.skipped ? ' (' + r.skipped + ' already on the list)' : ''}` : 'Everyone with an email is already on the list');
+        renderEmails();
+      } catch (e) { toast(e.message, 'alert-triangle'); }
+    });
 
     // Save settings helper (subject/body/enabled/sendDay)
     async function saveSettings(patch, okMsg) {

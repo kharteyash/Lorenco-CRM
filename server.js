@@ -2139,6 +2139,28 @@ app.post('/api/realtor/emails/recipients/import', safe(async (req, res) => {
   res.json({ ok: true, added, skipped });
 }));
 
+// One click: subscribe every lead that has an email. Multi-email leads add
+// each address; existing list entries are left untouched (ON CONFLICT).
+app.post('/api/realtor/emails/recipients/from-leads', safe(async (req, res) => {
+  if (!requireUser(req, res)) return;
+  const leads = await q(`SELECT name, email FROM realtor_leads
+                         WHERE realtor_id = $1 AND btrim(coalesce(email,'')) <> ''`, [req.user.id]);
+  let added = 0, skipped = 0;
+  for (const l of leads) {
+    for (const raw of String(l.email).split(/[,;\s]+/)) {
+      const email = raw.trim().toLowerCase().slice(0, 160);
+      if (!validEmail(email)) { if (email) skipped++; continue; }
+      try {
+        const r = await pool.query(
+          'INSERT INTO email_recipients (user_id, email, name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
+          [req.user.id, email, String(l.name || '').trim().slice(0, 120)]);
+        if (r.rowCount) added++; else skipped++;
+      } catch (e) { skipped++; }
+    }
+  }
+  res.json({ ok: true, added, skipped, leads: leads.length });
+}));
+
 app.delete('/api/realtor/emails/recipients/:id', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
   const id = Number(req.params.id);
