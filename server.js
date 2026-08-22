@@ -310,6 +310,8 @@ const SCHEMA = `
   -- email after, so each edition is only regenerated once.
   ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS refreshed_for TEXT;
   ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS topic_idx INTEGER;
+  ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS photo_url TEXT;
+  ALTER TABLE email_settings ADD COLUMN IF NOT EXISTS photo_credit TEXT;
 
   -- Per-user connected Google account (for sending weekly email as themselves
   -- via the Gmail API). Tokens may be stored encrypted (see TOKEN_ENC_KEY).
@@ -847,13 +849,13 @@ async function gmailFromFor(userId, gmailAddr) {
 }
 
 // nodemailer message body with the user's signature (mirrors the Gmail path).
-async function smtpMessageFor(userId, to, subject, body, unsub) {
+async function smtpMessageFor(userId, to, subject, body, unsub, hero) {
   const sig = await getSignature(userId);
   const photo = sig ? sigPhoto(sig) : null;
   const footText = unsub ? `\n\n—\nDon't want these weekly emails? Unsubscribe here: ${unsub.url}` : '';
   const footHtml = unsub ? `<div style="margin-top:26px;padding-top:12px;border-top:1px solid #e3e6ee;font-size:11.5px;color:#8a8fa3">Don't want these weekly emails? <a href="${unsub.url}" style="color:#8a8fa3">Unsubscribe</a>.</div>` : '';
   const headers = unsub ? { 'List-Unsubscribe': `<${unsub.url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : undefined;
-  const baseHtml = `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
+  const baseHtml = heroHtml(hero) + `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
   if (!sig) return { to, subject, headers, text: body + footText, html: baseHtml + footHtml };
   return {
     to, subject, headers,
@@ -1567,7 +1569,14 @@ function sigPhoto(sig) {
 // Send one message through the user's Gmail. Throws on failure.
 // The user's signature (if set) is appended: HTML with the inline photo,
 // plus a plain-text fallback part.
-async function sendViaGmail(userId, from, to, subject, body, bcc, unsub) {
+// Hero image (weekly emails): sits above the text, matched to the topic.
+function heroHtml(hero) {
+  if (!hero || !hero.url) return '';
+  return `<img src="${htmlEsc(hero.url)}" alt="" width="560" style="display:block;width:100%;max-width:560px;border-radius:12px;margin:0 0 6px">`
+    + (hero.credit ? `<div style="font-family:Arial,Helvetica,sans-serif;font-size:10.5px;color:#9aa1b5;margin:0 0 16px">${htmlEsc(hero.credit)}</div>` : '<div style="margin:0 0 16px"></div>');
+}
+
+async function sendViaGmail(userId, from, to, subject, body, bcc, unsub, hero) {
   const token = await getGoogleToken(userId);
   if (!token) throw new Error('Your Google connection expired — reconnect Gmail.');
   const sig = await getSignature(userId);
@@ -1580,11 +1589,13 @@ async function sendViaGmail(userId, from, to, subject, body, bcc, unsub) {
   const footHtml = unsub ? `<div style="margin-top:26px;padding-top:12px;border-top:1px solid #e3e6ee;font-family:Arial,Helvetica,sans-serif;font-size:11.5px;color:#8a8fa3">Don't want these weekly emails? <a href="${unsub.url}" style="color:#8a8fa3">Unsubscribe</a>.</div>` : '';
 
   let mime;
-  if (!sig) {
+  if (!sig && !hero) {
     mime = [...head, 'Content-Type: text/plain; charset="UTF-8"', '', body + footText].join('\r\n');
   } else {
-    const text = body + '\n\n' + sigText(sig) + footText;
-    const html = `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>` + sigHtml(sig, !!photo) + footHtml;
+    const text = body + (sig ? '\n\n' + sigText(sig) : '') + footText;
+    const html = heroHtml(hero)
+      + `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>`
+      + (sig ? sigHtml(sig, !!photo) : '') + footHtml;
     const alt = 'ALT-' + crypto.randomBytes(8).toString('hex');
     const altPart = [
       `--${alt}`, 'Content-Type: text/plain; charset="UTF-8"', '', text,
@@ -1957,7 +1968,37 @@ const SELLER_TOPIC_GROUPS = [
   ['Expired Listing Insight', ['Common reasons listings expire', 'How pricing strategy affects results', 'What "market fatigue" does to a listing', 'Marketing gaps that cause a listing to stall', 'Why photos/staging matter more than people think', 'Re-listing at the right price point', 'Timing a relist for maximum exposure', 'What buyers think when they see "expired"', "How to reset a listing's momentum", 'Questions to ask before re-listing with a new agent']],
   ['Emotional Readiness', ["How to know you're really ready to sell", 'Letting go of a home with memories', 'Balancing emotion with market logic', 'How to prepare mentally for showings', 'Handling lowball offers without taking it personally', 'What to expect emotionally during negotiations', 'Preparing for the final walk-through', 'How to separate house value from sentimental value', 'Managing family disagreements about selling', 'Why having a guide (agent) reduces selling stress']]
 ];
-const SELLER_TOPICS = SELLER_TOPIC_GROUPS.flatMap(([cat, list]) => list.map(topic => ({ cat, topic })));
+// Photo search terms per category, for the weekly hero image.
+const CATEGORY_IMG = {
+  'Curb Appeal': 'house,garden', 'Interior Maintenance': 'home,renovation', 'Kitchen Readiness': 'kitchen,interior',
+  'Bathroom Readiness': 'bathroom,interior', 'HVAC & Systems': 'repair,handyman', 'Roof & Structure': 'roof,repair',
+  'Staging & First Impressions': 'interior,design', 'Smell & Cleanliness': 'cleaning,home', 'Garage & Storage': 'garage',
+  'Paperwork & Prep for Sale': 'documents,desk', 'Market Updates': 'realestate', 'Timing Insight': 'calendar,planning',
+  'Local Community & Businesses': 'neighborhood,street', 'For Sale By Owner Risks': 'house,sale',
+  'Expired Listing Insight': 'house,forsale', 'Emotional Readiness': 'moving,boxes'
+};
+const SELLER_TOPICS = SELLER_TOPIC_GROUPS.flatMap(([cat, list]) => list.map(topic => ({ cat, topic, img: CATEGORY_IMG[cat] || 'house' })));
+
+// A photo to match the week's topic. With a (free) PEXELS_API_KEY the search
+// uses the exact subtopic for a high-quality on-point image; without one it
+// falls back to a keyless Flickr-CC service, deterministic per topic so the
+// photo is stable for the week but different from last week's.
+async function topicPhotoFor(t, idx) {
+  const key = process.env.PEXELS_API_KEY;
+  if (key) {
+    try {
+      const r = await fetch('https://api.pexels.com/v1/search?query=' + encodeURIComponent(t.topic + ' home') + '&orientation=landscape&per_page=15',
+        { headers: { Authorization: key } });
+      if (r.ok) {
+        const j = await r.json();
+        const list = j.photos || [];
+        const ph = list[idx % Math.max(1, list.length)];
+        if (ph && ph.src && ph.src.large) return { url: ph.src.large, credit: 'Photo: ' + (ph.photographer || 'Pexels') + ' / Pexels' };
+      }
+    } catch (e) { console.error('pexels lookup:', e.message); }
+  }
+  return { url: `https://loremflickr.com/960/540/${t.img}?lock=${idx}`, credit: 'Photo: Flickr Creative Commons' };
+}
 
 // Write next week's edition of the user's weekly email — the next subtopic
 // from the playbook, in the fixed format (subject = the subtopic, two short
@@ -2006,9 +2047,12 @@ Answer with ONLY a JSON object, no other text: {"subject": "...", "body": "..."}
   if (!/\{\{\s*name\s*\}\}/i.test(newBody)) newBody = 'Hi {{name}},\n\n' + newBody;
   // The sign-off is part of the format; add it if the model stopped at the CTA.
   if (!/(^|\n)\s*(best|warm regards|talk soon|cheers)\b/i.test(newBody)) newBody += `\n\nBest,\n${agent}`;
-  await q('UPDATE email_settings SET subject = $1, body = $2, topic_idx = $3, updated_at = now() WHERE user_id = $4',
-    [newSubject, newBody, idx + 1, userId]);
-  return { subject: newSubject, body: newBody, topic: t.topic, category: t.cat };
+  // Pair the edition with a photo that matches its topic (best-effort).
+  let photo = null;
+  try { photo = await topicPhotoFor(t, idx); } catch (e) { console.error('topic photo:', e.message); }
+  await q('UPDATE email_settings SET subject = $1, body = $2, topic_idx = $3, photo_url = $4, photo_credit = $5, updated_at = now() WHERE user_id = $6',
+    [newSubject, newBody, idx + 1, photo ? photo.url : null, photo ? photo.credit : null, userId]);
+  return { subject: newSubject, body: newBody, topic: t.topic, category: t.cat, photoUrl: photo ? photo.url : '', photoCredit: photo ? photo.credit : '' };
 }
 
 // The starter template is topic #1 of the playbook, in the standard format
@@ -2045,7 +2089,8 @@ function emailSettingsJson(s) {
   return {
     subject: s.subject || DEFAULT_SUBJECT, body: s.body || DEFAULT_BODY,
     enabled: s.enabled === true, sendDay: Number.isInteger(s.send_day) ? s.send_day : 1,
-    lastRun: s.last_run_date || null
+    lastRun: s.last_run_date || null,
+    photoUrl: s.photo_url || '', photoCredit: s.photo_credit || ''
   };
 }
 const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || '').trim());
@@ -2078,6 +2123,14 @@ async function sendWeeklyFor(userId, trigger) {
   else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
   const base = appBaseUrl();
+  // The week's hero photo: saved with the edition; older drafts without one
+  // fall back to a deterministic topic-matched pick so no send goes bare.
+  let hero = s.photo_url ? { url: s.photo_url, credit: s.photo_credit || '' } : null;
+  if (!hero) {
+    const i = (Number.isInteger(s.topic_idx) && s.topic_idx > 0 ? s.topic_idx - 1 : 0) % SELLER_TOPICS.length;
+    const t = SELLER_TOPICS[i];
+    hero = { url: `https://loremflickr.com/960/540/${t.img}?lock=${i}`, credit: 'Photo: Flickr Creative Commons' };
+  }
   let sent = 0, failed = 0, firstErr = '';
   for (const r of recips) {
     const subj = personalizeEmail(subject, r.name);
@@ -2089,8 +2142,8 @@ async function sendWeeklyFor(userId, trigger) {
         await q('UPDATE email_recipients SET unsub_token = $1 WHERE id = $2', [tok, r.id]);
       }
       const unsub = { url: base + '/unsubscribe/' + tok };
-      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text, null, unsub);
-      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text, unsub)));
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text, null, unsub, hero);
+      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text, unsub, hero)));
       sent++;
     } catch (e) {
       console.error('email send failed to', r.email, e.message);
@@ -2106,8 +2159,8 @@ async function sendWeeklyFor(userId, trigger) {
     if (selfTo) {
       const subj = '[Copy] ' + personalizeEmail(subject, (u && u.name) || '');
       const text = personalizeEmail(body, (u && u.name) || '');
-      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, selfTo, subj, text);
-      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text)));
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, selfTo, subj, text, null, null, hero);
+      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text, null, hero)));
     }
   } catch (e) { console.error('self copy failed:', e.message); }
   await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger, error)

@@ -1494,6 +1494,8 @@
       <div class="panel p-5 mt-5" style="max-width:720px">
         <h3 class="text-[14px] font-bold mb-1">The email</h3>
         <p class="text-[12px] text-muted mb-3">This is what goes out each week. Edit it anytime — write it in your own words and sign with your real name so it doesn't read like a template. <span class="font-mono">{{name}}</span> becomes each recipient's first name.${emailData.ai ? ' The day after each send, AI drafts the next edition automatically so the list never gets a repeat.' : ''}</p>
+        ${s.photoUrl ? `<div class="mb-3"><img src="${escA(s.photoUrl)}" alt="This week's photo" style="width:100%;max-width:440px;border-radius:10px;display:block">
+          <div class="text-[11px] text-muted mt-1">This week's photo — picked automatically to match the topic, shown at the top of the email.${s.photoCredit ? ' ' + esc(s.photoCredit) + '.' : ''}</div></div>` : ''}
         <div class="field mb-3"><label class="lbl">Subject</label><input id="em-subject" class="input mt-1" value="${escA(s.subject)}"></div>
         <div class="field mb-3"><label class="lbl">Message</label><textarea id="em-body" class="input mt-1" style="min-height:180px">${esc(s.body)}</textarea></div>
         <div class="flex items-center gap-3 flex-wrap"><button class="btn-primary" id="em-save"><i data-lucide="check"></i>Save email</button>
