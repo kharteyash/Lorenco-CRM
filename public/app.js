@@ -362,9 +362,33 @@
     });
   }
 
+  // ---------- Shared table pagination ----------
+  const PAGE_SIZE = 25;
+  function pageSlice(rows, page) {
+    const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    const p = Math.min(Math.max(0, page), pages - 1);
+    return { p, pages, slice: rows.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE) };
+  }
+  // Renders "26–50 of 87  ‹ 2/4 ›" into holderId and wires the arrows.
+  function drawPager(holderId, pg, total, onPage) {
+    const el = $(holderId); if (!el) return;
+    if (pg.pages <= 1) { el.innerHTML = ''; return; }
+    const start = pg.p * PAGE_SIZE + 1, end = Math.min(total, (pg.p + 1) * PAGE_SIZE);
+    el.innerHTML = `<div class="flex items-center justify-between px-3 py-1.5 border-t border-[var(--border)]">
+      <span class="text-[12px] text-muted">${start}–${end} of ${total}</span>
+      <div class="flex items-center gap-1.5">
+        <button class="act" data-pg="-1" ${pg.p === 0 ? 'disabled style="opacity:.35;cursor:default"' : ''} title="Previous page"><i data-lucide="chevron-left"></i></button>
+        <span class="text-[12px] text-muted num">${pg.p + 1} / ${pg.pages}</span>
+        <button class="act" data-pg="1" ${pg.p >= pg.pages - 1 ? 'disabled style="opacity:.35;cursor:default"' : ''} title="Next page"><i data-lucide="chevron-right"></i></button>
+      </div></div>`;
+    icons();
+    el.querySelectorAll('[data-pg]').forEach(b => b.addEventListener('click', () => { if (!b.disabled) onPage(pg.p + Number(b.dataset.pg)); }));
+  }
+
   // ---------- Leads ----------
   let leadCache = [];
   let leadQuery = '';
+  let leadPage = 0;
   async function renderLeads() {
     try { leadCache = await api('/api/realtor/leads'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
@@ -379,6 +403,7 @@
           <span class="text-[12px] text-muted ml-auto" id="lead-count"></span>
         </div>
         <div style="overflow-x:auto"><table class="tbl dense" id="lead-table"></table></div>
+        <div id="lead-pager"></div>
       </div>
       <input type="file" id="lead-file" accept=".csv" class="hidden">`;
     icons();
@@ -386,7 +411,7 @@
     $('lead-intake').addEventListener('click', intakeModal);
     $('lead-import').addEventListener('click', () => $('lead-file').click());
     $('lead-file').addEventListener('change', importLeadsCsv);
-    $('lead-search').addEventListener('input', e => { leadQuery = e.target.value; drawLeads(); });
+    $('lead-search').addEventListener('input', e => { leadQuery = e.target.value; leadPage = 0; drawLeads(); });
     drawLeads();
   }
 
@@ -423,9 +448,10 @@
     const ql = leadQuery.trim().toLowerCase();
     const rows = leadCache.filter(l => !ql || (l.name + ' ' + l.email + ' ' + l.phone + ' ' + l.area).toLowerCase().includes(ql));
     $('lead-count').textContent = rows.length + ' of ' + leadCache.length;
-    if (!rows.length) { t.innerHTML = `<tbody><tr><td>${emptyState('user-plus', leadCache.length ? 'No matches' : 'No leads yet', leadCache.length ? 'Try a different search.' : 'Add your first lead to get started.')}</td></tr></tbody>`; icons(); return; }
+    if (!rows.length) { t.innerHTML = `<tbody><tr><td>${emptyState('user-plus', leadCache.length ? 'No matches' : 'No leads yet', leadCache.length ? 'Try a different search.' : 'Add your first lead to get started.')}</td></tr></tbody>`; $('lead-pager').innerHTML = ''; icons(); return; }
+    const pg = pageSlice(rows, leadPage); leadPage = pg.p;
     t.innerHTML = `<thead><tr><th>Name</th><th>Timeline</th><th>Intent</th><th>Readiness</th><th>Contact</th><th></th></tr></thead>
-      <tbody>${rows.map(l => {
+      <tbody>${pg.slice.map(l => {
         const r = clientScore(l);
         return `<tr>
           <td><div class="flex items-center gap-2.5"><div class="avatar sm">${initials(l.name)}</div>
@@ -443,6 +469,7 @@
         </tr>`;
       }).join('')}</tbody>`;
     icons();
+    drawPager('lead-pager', pg, rows.length, (p) => { leadPage = p; drawLeads(); });
     t.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => leadDrawer(+b.dataset.view)));
     t.querySelectorAll('[data-log]').forEach(b => b.addEventListener('click', () => { const l = leadCache.find(x => x.id == b.dataset.log); logCallModal(l); }));
     t.querySelectorAll('[data-edit-lead]').forEach(b => b.addEventListener('click', () => { const l = leadCache.find(x => x.id == b.dataset.editLead); if (l) leadModal(l); }));
@@ -849,17 +876,22 @@
 
   // ---------- Past Clients ----------
   let clientCache = [];
+  let clientPage = 0;
   async function renderClients() {
     try { clientCache = await api('/api/realtor/clients'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
       ${pageHead('Past Clients', 'Your closed deals and relationships to nurture.', `<button class="btn-primary" id="cl-add"><i data-lucide="plus"></i>Add client</button>`)}
-      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="cl-table"></table></div></div>`;
+      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="cl-table"></table></div><div id="cl-pager"></div></div>`;
     icons();
     $('cl-add').addEventListener('click', () => clientModal(null));
-    const t = $('cl-table');
-    if (!clientCache.length) { t.innerHTML = `<tbody><tr><td>${emptyState('user-check', 'No past clients yet', 'Close a lead as won, or add a client directly.')}</td></tr></tbody>`; icons(); return; }
+    drawClients();
+  }
+  function drawClients() {
+    const t = $('cl-table'); if (!t) return;
+    if (!clientCache.length) { t.innerHTML = `<tbody><tr><td>${emptyState('user-check', 'No past clients yet', 'Close a lead as won, or add a client directly.')}</td></tr></tbody>`; $('cl-pager').innerHTML = ''; icons(); return; }
+    const pg = pageSlice(clientCache, clientPage); clientPage = pg.p;
     t.innerHTML = `<thead><tr><th>Name</th><th>Deal</th><th>Price</th><th>Closed</th><th>Contact</th><th></th></tr></thead>
-      <tbody>${clientCache.map(c => `<tr>
+      <tbody>${pg.slice.map(c => `<tr>
         <td><div class="flex items-center gap-2.5"><div class="avatar sm">${initials(c.name)}</div>
           <div class="min-w-0"><div class="font-semibold text-[13px] truncate">${esc(c.name)}</div><div class="text-[11.5px] text-muted truncate">${esc(c.area || c.address) || '—'}</div></div></div></td>
         <td>${c.dealType ? `<span class="badge blue">${esc(c.dealType)}</span>` : '<span class="text-muted">—</span>'}</td>
@@ -871,6 +903,7 @@
           <button class="act" data-del="${c.id}"><i data-lucide="trash-2"></i></button></div></td>
       </tr>`).join('')}</tbody>`;
     icons();
+    drawPager('cl-pager', pg, clientCache.length, (p) => { clientPage = p; drawClients(); });
     t.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => clientModal(clientCache.find(x => x.id == b.dataset.edit))));
     t.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
       if (!confirm('Delete this past client?')) return;
@@ -900,17 +933,22 @@
 
   // ---------- Contacts ----------
   let contactCache = [];
+  let contactPage = 0;
   async function renderContacts() {
     try { contactCache = await api('/api/realtor/contacts'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
       ${pageHead('Contacts', 'Your address book — lenders, vendors, and everyone else.', `<button class="btn-primary" id="ct-add"><i data-lucide="plus"></i>Add contact</button>`)}
-      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="ct-table"></table></div></div>`;
+      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="ct-table"></table></div><div id="ct-pager"></div></div>`;
     icons();
     $('ct-add').addEventListener('click', () => contactModal(null));
-    const t = $('ct-table');
-    if (!contactCache.length) { t.innerHTML = `<tbody><tr><td>${emptyState('contact', 'No contacts yet', 'Add lenders, inspectors, and other partners.')}</td></tr></tbody>`; icons(); return; }
+    drawContacts();
+  }
+  function drawContacts() {
+    const t = $('ct-table'); if (!t) return;
+    if (!contactCache.length) { t.innerHTML = `<tbody><tr><td>${emptyState('contact', 'No contacts yet', 'Add lenders, inspectors, and other partners.')}</td></tr></tbody>`; $('ct-pager').innerHTML = ''; icons(); return; }
+    const pg = pageSlice(contactCache, contactPage); contactPage = pg.p;
     t.innerHTML = `<thead><tr><th>Name</th><th>Company</th><th>Tag</th><th>Reach</th><th></th></tr></thead>
-      <tbody>${contactCache.map(c => `<tr>
+      <tbody>${pg.slice.map(c => `<tr>
         <td><div class="flex items-center gap-2.5"><div class="avatar sm">${initials(c.name)}</div>
           <div class="min-w-0"><div class="font-semibold text-[13px] truncate">${esc(c.name)}</div><div class="text-[11.5px] text-muted truncate">${esc(c.email) || esc(c.phone) || '—'}</div></div></div></td>
         <td>${c.company ? esc(c.company) : '<span class="text-muted">—</span>'}</td>
@@ -921,6 +959,7 @@
           <button class="act" data-del="${c.id}"><i data-lucide="trash-2"></i></button></div></td>
       </tr>`).join('')}</tbody>`;
     icons();
+    drawPager('ct-pager', pg, contactCache.length, (p) => { contactPage = p; drawContacts(); });
     t.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => contactModal(contactCache.find(x => x.id == b.dataset.edit))));
     t.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
       if (!confirm('Delete this contact?')) return;
