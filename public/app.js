@@ -378,7 +378,7 @@
           <input id="lead-search" class="input" style="padding-left:32px" placeholder="Search leads..." value="${escA(leadQuery)}"></div>
           <span class="text-[12px] text-muted ml-auto" id="lead-count"></span>
         </div>
-        <div style="overflow-x:auto"><table class="tbl" id="lead-table"></table></div>
+        <div style="overflow-x:auto"><table class="tbl dense" id="lead-table"></table></div>
       </div>
       <input type="file" id="lead-file" accept=".csv" class="hidden">`;
     icons();
@@ -853,7 +853,7 @@
     try { clientCache = await api('/api/realtor/clients'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
       ${pageHead('Past Clients', 'Your closed deals and relationships to nurture.', `<button class="btn-primary" id="cl-add"><i data-lucide="plus"></i>Add client</button>`)}
-      <div class="panel"><div style="overflow-x:auto"><table class="tbl" id="cl-table"></table></div></div>`;
+      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="cl-table"></table></div></div>`;
     icons();
     $('cl-add').addEventListener('click', () => clientModal(null));
     const t = $('cl-table');
@@ -904,7 +904,7 @@
     try { contactCache = await api('/api/realtor/contacts'); } catch (e) { return errView(e); }
     $('view').innerHTML = `
       ${pageHead('Contacts', 'Your address book — lenders, vendors, and everyone else.', `<button class="btn-primary" id="ct-add"><i data-lucide="plus"></i>Add contact</button>`)}
-      <div class="panel"><div style="overflow-x:auto"><table class="tbl" id="ct-table"></table></div></div>`;
+      <div class="panel"><div style="overflow-x:auto"><table class="tbl dense" id="ct-table"></table></div></div>`;
     icons();
     $('ct-add').addEventListener('click', () => contactModal(null));
     const t = $('ct-table');
@@ -1445,14 +1445,19 @@
       </div>`;
     const recips = emailData.recipients;
     const activeCount = recips.filter(r => !r.unsubscribed).length;
-    const recipRows = recips.length ? recips.map(r => `
-      <div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0" ${r.unsubscribed ? 'style="opacity:.55"' : ''}>
-        <div class="avatar sm">${initials(r.name || r.email)}</div>
-        <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(r.name || r.email)}</div>
-          ${r.name ? `<div class="text-[11.5px] text-muted truncate">${esc(r.email)}</div>` : ''}</div>
-        ${r.unsubscribed ? '<span class="badge gray" title="They opted out via the unsubscribe link — sends skip them.">Unsubscribed</span>' : ''}
-        <button class="act" data-rm="${r.id}" title="Remove"><i data-lucide="trash-2"></i></button>
-      </div>`).join('') : `<div class="text-[13px] text-muted py-6 text-center">No one on the list yet. Add your first contact above.</div>`;
+    const cellClip = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    const recipRows = recips.length ? `
+      <div class="tbl-scroll" style="max-height:430px">
+        <table class="tbl dense">
+          <thead><tr><th>Name</th><th>Email</th><th></th><th></th></tr></thead>
+          <tbody>${recips.map(r => `<tr ${r.unsubscribed ? 'style="opacity:.55"' : ''}>
+            <td class="font-semibold" style="max-width:150px;${cellClip}">${esc(r.name) || '<span class="text-muted font-normal">—</span>'}</td>
+            <td style="max-width:220px;${cellClip}">${esc(r.email)}</td>
+            <td>${r.unsubscribed ? '<span class="badge gray" title="They opted out via the unsubscribe link — sends skip them.">Unsubscribed</span>' : ''}</td>
+            <td style="text-align:right;width:36px"><button class="act" data-rm="${r.id}" title="Remove"><i data-lucide="trash-2"></i></button></td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>` : `<div class="text-[13px] text-muted py-6 text-center">No one on the list yet. Add your first contact above.</div>`;
     const history = emailData.history.length ? `
       <div class="panel p-4 mt-5"><h3 class="text-[14px] font-bold mb-1">Recent sends</h3>
       ${emailData.history.map(h => `<div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0">
