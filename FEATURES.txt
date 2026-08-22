@@ -110,7 +110,13 @@ AUTO EMAILS  (weekly mailing list)
 - Schedule a weekly send (pick the weekday, toggle on/off).
 - "Send to everyone now" for an immediate blast.
 - Connect Gmail: send as yourself via your own Google account. Falls back
-  to shared SMTP if configured. Recent sends are logged.
+  to shared SMTP if configured. Recent sends are logged (with the failure
+  reason when a blast can't go out).
+- Unsubscribe built in: every weekly email carries an unsubscribe link
+  (plus the standard one-click headers, so Gmail shows its own
+  Unsubscribe button). Opt-outs are remembered — future sends and
+  "Add my leads" skip them; they show dimmed on the mailing list. Only
+  re-adding an address by hand re-subscribes it.
 
 SETTINGS
 - Automatic follow-ups on/off.

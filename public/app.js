@@ -1444,11 +1444,13 @@
         </div>
       </div>`;
     const recips = emailData.recipients;
+    const activeCount = recips.filter(r => !r.unsubscribed).length;
     const recipRows = recips.length ? recips.map(r => `
-      <div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0">
+      <div class="flex items-center gap-3 py-2 border-b border-[var(--border)] last:border-0" ${r.unsubscribed ? 'style="opacity:.55"' : ''}>
         <div class="avatar sm">${initials(r.name || r.email)}</div>
         <div class="min-w-0 flex-1"><div class="text-[13px] font-semibold truncate">${esc(r.name || r.email)}</div>
           ${r.name ? `<div class="text-[11.5px] text-muted truncate">${esc(r.email)}</div>` : ''}</div>
+        ${r.unsubscribed ? '<span class="badge gray" title="They opted out via the unsubscribe link — sends skip them.">Unsubscribed</span>' : ''}
         <button class="act" data-rm="${r.id}" title="Remove"><i data-lucide="trash-2"></i></button>
       </div>`).join('') : `<div class="text-[13px] text-muted py-6 text-center">No one on the list yet. Add your first contact above.</div>`;
     const history = emailData.history.length ? `
@@ -1466,8 +1468,8 @@
       ${notice}
       <div class="grid-2">
         <div class="panel p-4">
-          <h3 class="text-[14px] font-bold mb-1">Mailing list <span class="text-muted font-medium">(${recips.length})</span></h3>
-          <p class="text-[12px] text-muted mb-3">Everyone here gets the weekly email.</p>
+          <h3 class="text-[14px] font-bold mb-1">Mailing list <span class="text-muted font-medium">(${activeCount}${activeCount !== recips.length ? ' of ' + recips.length : ''})</span></h3>
+          <p class="text-[12px] text-muted mb-3">Everyone here gets the weekly email — each one includes an unsubscribe link, and opt-outs are honored automatically.</p>
           <div class="flex gap-2 mb-1">
             <input id="em-email" class="input" placeholder="name@email.com" style="flex:1">
             <input id="em-name" class="input" placeholder="Name (optional)" style="width:120px">

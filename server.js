@@ -291,6 +291,8 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS email_recipients_owner ON email_recipients (user_id, id);
   -- One address only once per account.
   CREATE UNIQUE INDEX IF NOT EXISTS email_recipients_uniq ON email_recipients (user_id, lower(email));
+  ALTER TABLE email_recipients ADD COLUMN IF NOT EXISTS unsub_token TEXT;
+  ALTER TABLE email_recipients ADD COLUMN IF NOT EXISTS unsubscribed BOOLEAN DEFAULT FALSE;
 
   -- The weekly-email settings for an account: the template (subject/body), whether
   -- it's on, which weekday to send (0=Sun..6=Sat), and the last date it ran (guards
@@ -845,15 +847,18 @@ async function gmailFromFor(userId, gmailAddr) {
 }
 
 // nodemailer message body with the user's signature (mirrors the Gmail path).
-async function smtpMessageFor(userId, to, subject, body) {
+async function smtpMessageFor(userId, to, subject, body, unsub) {
   const sig = await getSignature(userId);
   const photo = sig ? sigPhoto(sig) : null;
+  const footText = unsub ? `\n\n—\nDon't want these weekly emails? Unsubscribe here: ${unsub.url}` : '';
+  const footHtml = unsub ? `<div style="margin-top:26px;padding-top:12px;border-top:1px solid #e3e6ee;font-size:11.5px;color:#8a8fa3">Don't want these weekly emails? <a href="${unsub.url}" style="color:#8a8fa3">Unsubscribe</a>.</div>` : '';
+  const headers = unsub ? { 'List-Unsubscribe': `<${unsub.url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : undefined;
   const baseHtml = `<div style="white-space:pre-wrap;font-family:sans-serif">${body.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
-  if (!sig) return { to, subject, text: body, html: baseHtml };
+  if (!sig) return { to, subject, headers, text: body + footText, html: baseHtml + footHtml };
   return {
-    to, subject,
-    text: body + '\n\n' + sigText(sig),
-    html: baseHtml + sigHtml(sig, !!photo),
+    to, subject, headers,
+    text: body + '\n\n' + sigText(sig) + footText,
+    html: baseHtml + sigHtml(sig, !!photo) + footHtml,
     attachments: photo ? [{ filename: 'photo.jpg', content: Buffer.from(photo.b64, 'base64'), contentType: photo.mime, cid: 'sigphoto' }] : undefined
   };
 }
@@ -1562,19 +1567,24 @@ function sigPhoto(sig) {
 // Send one message through the user's Gmail. Throws on failure.
 // The user's signature (if set) is appended: HTML with the inline photo,
 // plus a plain-text fallback part.
-async function sendViaGmail(userId, from, to, subject, body, bcc) {
+async function sendViaGmail(userId, from, to, subject, body, bcc, unsub) {
   const token = await getGoogleToken(userId);
   if (!token) throw new Error('Your Google connection expired — reconnect Gmail.');
   const sig = await getSignature(userId);
   const photo = sig ? sigPhoto(sig) : null;
   const head = [`From: ${from}`, `To: ${to}`, ...(bcc ? [`Bcc: ${bcc}`] : []), `Subject: ${subject}`, 'MIME-Version: 1.0'];
+  // RFC 8058 one-click headers: Gmail/Outlook surface their own native
+  // "Unsubscribe" button next to the sender.
+  if (unsub) head.splice(head.length - 1, 0, `List-Unsubscribe: <${unsub.url}>`, 'List-Unsubscribe-Post: List-Unsubscribe=One-Click');
+  const footText = unsub ? `\n\n—\nDon't want these weekly emails? Unsubscribe here: ${unsub.url}` : '';
+  const footHtml = unsub ? `<div style="margin-top:26px;padding-top:12px;border-top:1px solid #e3e6ee;font-family:Arial,Helvetica,sans-serif;font-size:11.5px;color:#8a8fa3">Don't want these weekly emails? <a href="${unsub.url}" style="color:#8a8fa3">Unsubscribe</a>.</div>` : '';
 
   let mime;
   if (!sig) {
-    mime = [...head, 'Content-Type: text/plain; charset="UTF-8"', '', body].join('\r\n');
+    mime = [...head, 'Content-Type: text/plain; charset="UTF-8"', '', body + footText].join('\r\n');
   } else {
-    const text = body + '\n\n' + sigText(sig);
-    const html = `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>` + sigHtml(sig, !!photo);
+    const text = body + '\n\n' + sigText(sig) + footText;
+    const html = `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1b2e">${htmlEsc(body)}</div>` + sigHtml(sig, !!photo) + footHtml;
     const alt = 'ALT-' + crypto.randomBytes(8).toString('hex');
     const altPart = [
       `--${alt}`, 'Content-Type: text/plain; charset="UTF-8"', '', text,
@@ -2042,9 +2052,18 @@ const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || '').trim
 
 // Send one account's list now. Prefers the user's connected Gmail (sends as
 // them); falls back to shared SMTP. Returns { sent, failed, recipients, via, error? }.
+// Where the app lives publicly (for links inside emails). APP_URL wins;
+// otherwise derived from the OAuth redirect, which points at the same host.
+function appBaseUrl() {
+  if (process.env.APP_URL) return String(process.env.APP_URL).replace(/\/+$/, '');
+  const m = /^(https?:\/\/[^/]+)/.exec(String(process.env.GOOGLE_REDIRECT_URI || ''));
+  return m ? m[1] : 'http://localhost:' + (process.env.PORT || 3000);
+}
+
 async function sendWeeklyFor(userId, trigger) {
   const s = await loadEmailSettings(userId);
-  const recips = await q('SELECT email, name FROM email_recipients WHERE user_id = $1', [userId]);
+  const recips = await q(`SELECT id, email, name, unsub_token FROM email_recipients
+                          WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE)`, [userId]);
   if (!recips.length) return { sent: 0, failed: 0, recipients: 0, error: 'No recipients on your list yet.' };
 
   const subject = s.subject || DEFAULT_SUBJECT;
@@ -2058,13 +2077,20 @@ async function sendWeeklyFor(userId, trigger) {
   else if (tx) { via = 'smtp'; }
   else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
+  const base = appBaseUrl();
   let sent = 0, failed = 0, firstErr = '';
   for (const r of recips) {
     const subj = personalizeEmail(subject, r.name);
     const text = personalizeEmail(body, r.name);
     try {
-      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text);
-      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text)));
+      let tok = r.unsub_token;
+      if (!tok) {
+        tok = crypto.randomBytes(16).toString('base64url');
+        await q('UPDATE email_recipients SET unsub_token = $1 WHERE id = $2', [tok, r.id]);
+      }
+      const unsub = { url: base + '/unsubscribe/' + tok };
+      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, r.email, subj, text, null, unsub);
+      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, r.email, subj, text, unsub)));
       sent++;
     } catch (e) {
       console.error('email send failed to', r.email, e.message);
@@ -2094,12 +2120,13 @@ async function sendWeeklyFor(userId, trigger) {
 
 app.get('/api/realtor/emails', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
-  const recipients = await q('SELECT id, email, name FROM email_recipients WHERE user_id = $1 ORDER BY lower(email)', [req.user.id]);
+  const recipients = await q(`SELECT id, email, name, coalesce(unsubscribed, FALSE) AS unsubscribed
+                              FROM email_recipients WHERE user_id = $1 ORDER BY lower(email)`, [req.user.id]);
   const settings = emailSettingsJson(await loadEmailSettings(req.user.id));
   const history = await q('SELECT subject, recipients, sent, failed, trigger, error, created_at FROM email_sends WHERE user_id = $1 ORDER BY id DESC LIMIT 10', [req.user.id]);
   const gmail = await googleStatus(req.user.id);
   res.json({
-    recipients: recipients.map(r => ({ id: r.id, email: r.email, name: r.name || '' })),
+    recipients: recipients.map(r => ({ id: r.id, email: r.email, name: r.name || '', unsubscribed: !!r.unsubscribed })),
     settings,
     weekdays: WEEKDAYS,
     gmail,
@@ -2127,8 +2154,14 @@ app.post('/api/realtor/emails/recipients', safe(async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase().slice(0, 160);
   const name = String((req.body || {}).name || '').trim().slice(0, 120);
   if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-  const dup = await one('SELECT id FROM email_recipients WHERE user_id = $1 AND lower(email) = $2', [req.user.id, email]);
-  if (dup) return res.status(409).json({ error: 'That address is already on your list.' });
+  const dup = await one('SELECT id, coalesce(unsubscribed, FALSE) AS unsubscribed FROM email_recipients WHERE user_id = $1 AND lower(email) = $2', [req.user.id, email]);
+  if (dup && !dup.unsubscribed) return res.status(409).json({ error: 'That address is already on your list.' });
+  if (dup) {
+    // They opted out earlier; adding them by hand is a deliberate re-subscribe.
+    const row = await one('UPDATE email_recipients SET unsubscribed = FALSE, name = coalesce(nullif($3, \'\'), name) WHERE id = $1 AND user_id = $2 RETURNING id, email, name',
+      [dup.id, req.user.id, name]);
+    return res.json({ id: row.id, email: row.email, name: row.name || '', resubscribed: true });
+  }
   const row = await one('INSERT INTO email_recipients (user_id, email, name) VALUES ($1,$2,$3) RETURNING id, email, name',
     [req.user.id, email, name]);
   res.json({ id: row.id, email: row.email, name: row.name || '' });
@@ -2172,6 +2205,40 @@ app.post('/api/realtor/emails/recipients/from-leads', safe(async (req, res) => {
     }
   }
   res.json({ ok: true, added, skipped, leads: leads.length });
+}));
+
+// ----- Public unsubscribe (linked from every weekly email) -----
+function unsubPage(title, inner) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEsc(title)}</title></head>
+<body style="margin:0;background:#F2F4F8;font-family:system-ui,'Segoe UI',Roboto,sans-serif;color:#1a1b2e">
+<div style="max-width:440px;margin:12vh auto 0;background:#fff;border:1px solid #dfe3ec;border-radius:14px;padding:34px;text-align:center">${inner}</div>
+</body></html>`;
+}
+// GET shows a confirm button — mail scanners that prefetch links must never
+// unsubscribe anyone by accident. The POST (button or Gmail's native
+// one-click header) does the actual opt-out.
+app.get('/unsubscribe/:token', safe(async (req, res) => {
+  const r = await one(`SELECT er.email, coalesce(er.unsubscribed, FALSE) AS unsubscribed, u.name AS agent
+                       FROM email_recipients er JOIN users u ON u.id = er.user_id
+                       WHERE er.unsub_token = $1`, [String(req.params.token || '')]);
+  if (!r) return res.status(404).send(unsubPage('Link not found', `<h2 style="margin:0 0 10px;font-size:19px">This link isn't valid</h2>
+    <p style="font-size:14px;color:#66708A;margin:0">It may have already been used, or the address was removed from the list.</p>`));
+  if (r.unsubscribed) return res.send(unsubPage('Already unsubscribed', `<h2 style="margin:0 0 10px;font-size:19px">You're already unsubscribed</h2>
+    <p style="font-size:14px;color:#66708A;margin:0"><b>${htmlEsc(r.email)}</b> no longer receives these emails.</p>`));
+  res.send(unsubPage('Unsubscribe', `<h2 style="margin:0 0 10px;font-size:19px">Unsubscribe from weekly emails?</h2>
+    <p style="font-size:14px;color:#66708A;margin:0 0 22px"><b>${htmlEsc(r.email)}</b> will stop receiving ${htmlEsc(r.agent || 'these')} weekly real-estate emails.</p>
+    <form method="POST" action="/unsubscribe/${htmlEsc(req.params.token)}" style="margin:0">
+      <button type="submit" style="background:#C0392B;color:#fff;border:none;border-radius:9px;padding:11px 26px;font-size:14px;font-weight:600;cursor:pointer">Unsubscribe</button>
+    </form>
+    <p style="font-size:12px;color:#9aa1b5;margin:18px 0 0">Changed your mind? Just close this page — nothing happens until you click.</p>`));
+}));
+app.post('/unsubscribe/:token', safe(async (req, res) => {
+  const r = await one('SELECT id, email FROM email_recipients WHERE unsub_token = $1', [String(req.params.token || '')]);
+  if (!r) return res.status(404).send(unsubPage('Link not found', `<h2 style="margin:0 0 10px;font-size:19px">This link isn't valid</h2>
+    <p style="font-size:14px;color:#66708A;margin:0">It may have already been used, or the address was removed from the list.</p>`));
+  await q('UPDATE email_recipients SET unsubscribed = TRUE WHERE id = $1', [r.id]);
+  res.send(unsubPage('Unsubscribed', `<h2 style="margin:0 0 10px;font-size:19px">You're unsubscribed ✓</h2>
+    <p style="font-size:14px;color:#66708A;margin:0"><b>${htmlEsc(r.email)}</b> won't receive these weekly emails anymore.</p>`));
 }));
 
 app.delete('/api/realtor/emails/recipients/:id', safe(async (req, res) => {
