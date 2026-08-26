@@ -1629,7 +1629,13 @@
       if (!recips.length) return toast('Add someone to your list first.', 'info');
       if (!confirm(`Send this email to all ${recips.length} recipient${recips.length === 1 ? '' : 's'} now?`)) return;
       const btn = $('em-send'); btn.disabled = true;
-      try { const r = await api('/api/realtor/emails/send-now', { method: 'POST' }); toast(`Sent to ${r.sent} of ${r.recipients}`); renderEmails(); }
+      try {
+        const r = await api('/api/realtor/emails/send-now', { method: 'POST' });
+        toast(r.remaining
+          ? `Sent ${r.sent} now — ${r.remaining} more queued, going out automatically over the next hour`
+          : `Sent to ${r.sent} of ${r.recipients}`);
+        renderEmails();
+      }
       catch (e) { toast(e.message, 'alert-triangle'); btn.disabled = false; }
     });
   }

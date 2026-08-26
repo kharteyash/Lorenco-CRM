@@ -293,6 +293,9 @@ const SCHEMA = `
   CREATE UNIQUE INDEX IF NOT EXISTS email_recipients_uniq ON email_recipients (user_id, lower(email));
   ALTER TABLE email_recipients ADD COLUMN IF NOT EXISTS unsub_token TEXT;
   ALTER TABLE email_recipients ADD COLUMN IF NOT EXISTS unsubscribed BOOLEAN DEFAULT FALSE;
+  -- Which edition (send date) this recipient already received: powers batched
+  -- sending — the blast drips out in small groups until everyone has it.
+  ALTER TABLE email_recipients ADD COLUMN IF NOT EXISTS sent_for TEXT;
 
   -- The weekly-email settings for an account: the template (subject/body), whether
   -- it's on, which weekday to send (0=Sun..6=Sat), and the last date it ran (guards
@@ -336,6 +339,7 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS email_sends_owner ON email_sends (user_id, id);
   ALTER TABLE email_sends ADD COLUMN IF NOT EXISTS error TEXT;
+  ALTER TABLE email_sends ADD COLUMN IF NOT EXISTS run_date TEXT;
 `;
 
 // Periodically clear expired sessions.
@@ -2105,11 +2109,27 @@ function appBaseUrl() {
   return m ? m[1] : 'http://localhost:' + (process.env.PORT || 3000);
 }
 
-async function sendWeeklyFor(userId, trigger) {
+// Gmail blocks accounts that blast a whole list in one burst ("You have
+// reached a limit for sending mail"). So each edition drips out: at most
+// BATCH_MAX messages per run, ~1s apart, and the dispatcher keeps calling
+// until everyone has this edition (sent_for tracks who already got it —
+// nobody is ever sent the same edition twice). On a limit/quota error the
+// batch stops instantly and the rest stays queued for the next run.
+const BATCH_MAX = Number(process.env.EMAIL_BATCH_MAX) || 35;
+const SEND_SPACING_MS = Number(process.env.EMAIL_SEND_SPACING_MS) || 1100;
+const isLimitError = (m) => /limit|quota|rate|too many|429/i.test(String(m || ''));
+
+async function sendWeeklyBatch(userId, runDate, trigger) {
   const s = await loadEmailSettings(userId);
-  const recips = await q(`SELECT id, email, name, unsub_token FROM email_recipients
-                          WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE)`, [userId]);
-  if (!recips.length) return { sent: 0, failed: 0, recipients: 0, error: 'No recipients on your list yet.' };
+  const total = await one(`SELECT count(*)::int AS n FROM email_recipients
+                           WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE)`, [userId]);
+  if (!total.n) return { sent: 0, failed: 0, recipients: 0, remaining: 0, error: 'No recipients on your list yet.' };
+  const doneBefore = await one(`SELECT count(*)::int AS n FROM email_recipients
+                                WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE) AND sent_for = $2`, [userId, runDate]);
+  const pending = await q(`SELECT id, email, name, unsub_token FROM email_recipients
+                           WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE) AND sent_for IS DISTINCT FROM $2
+                           ORDER BY id LIMIT $3`, [userId, runDate, BATCH_MAX]);
+  if (!pending.length) return { sent: 0, failed: 0, recipients: total.n, remaining: 0 };
 
   const subject = s.subject || DEFAULT_SUBJECT;
   const body = s.body || DEFAULT_BODY;
@@ -2120,7 +2140,7 @@ async function sendWeeklyFor(userId, trigger) {
   let via = null, gmailFrom = '';
   if (gmail) { via = 'gmail'; gmailFrom = await gmailFromFor(userId, gmail.email); }
   else if (tx) { via = 'smtp'; }
-  else return { sent: 0, failed: 0, recipients: recips.length, error: 'Connect Gmail (or configure SMTP) to send.' };
+  else return { sent: 0, failed: 0, recipients: total.n, remaining: pending.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
   const base = appBaseUrl();
   // The week's hero photo: saved with the edition; older drafts without one
@@ -2131,8 +2151,12 @@ async function sendWeeklyFor(userId, trigger) {
     const t = SELLER_TOPICS[i];
     hero = { url: `https://loremflickr.com/960/540/${t.img}?lock=${i}`, credit: 'Photo: Flickr Creative Commons' };
   }
-  let sent = 0, failed = 0, firstErr = '';
-  for (const r of recips) {
+
+  let sent = 0, failed = 0, firstErr = '', limitHit = false;
+  for (const r of pending) {
+    // Claim before sending so overlapping runs can't double-send anyone.
+    const claim = await pool.query('UPDATE email_recipients SET sent_for = $1 WHERE id = $2 AND sent_for IS DISTINCT FROM $1', [runDate, r.id]);
+    if (!claim.rowCount) continue;
     const subj = personalizeEmail(subject, r.name);
     const text = personalizeEmail(body, r.name);
     try {
@@ -2147,28 +2171,47 @@ async function sendWeeklyFor(userId, trigger) {
       sent++;
     } catch (e) {
       console.error('email send failed to', r.email, e.message);
-      failed++;
       if (!firstErr) firstErr = String(e.message || 'send failed').slice(0, 300);
+      if (isLimitError(e.message)) {
+        // Provider says slow down: release this recipient and stop the batch —
+        // the next dispatcher run picks the queue back up.
+        await q('UPDATE email_recipients SET sent_for = NULL WHERE id = $1', [r.id]);
+        limitHit = true;
+        break;
+      }
+      failed++; // non-limit failure: counted, not retried (bad address etc.)
     }
+    await new Promise(res => setTimeout(res, SEND_SPACING_MS));
   }
-  // One "[Copy]" to the sender so they see exactly what the list received
-  // (not counted in the send stats; a failure here never fails the blast).
-  try {
-    const u = await one('SELECT name, email FROM users WHERE id = $1', [userId]);
-    const selfTo = gmail ? gmail.email : (u && u.email);
-    if (selfTo) {
-      const subj = '[Copy] ' + personalizeEmail(subject, (u && u.name) || '');
-      const text = personalizeEmail(body, (u && u.name) || '');
-      if (via === 'gmail') await sendViaGmail(userId, gmailFrom, selfTo, subj, text, null, null, hero);
-      else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text, null, hero)));
-    }
-  } catch (e) { console.error('self copy failed:', e.message); }
-  await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger, error)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [userId, subject, recips.length, sent, failed, trigger || 'manual', firstErr || null]);
-  // When literally nothing went out, surface the reason instead of "sent 0".
-  if (!sent && failed) return { sent, failed, recipients: recips.length, via, error: firstErr || 'Every send failed.' };
-  return { sent, failed, recipients: recips.length, via };
+
+  // One "[Copy]" to the sender with the first batch, so they see what the
+  // list is receiving (not counted in stats; failure never fails the blast).
+  if (doneBefore.n === 0 && sent > 0) {
+    try {
+      const u = await one('SELECT name, email FROM users WHERE id = $1', [userId]);
+      const selfTo = gmail ? gmail.email : (u && u.email);
+      if (selfTo) {
+        const subj = '[Copy] ' + personalizeEmail(subject, (u && u.name) || '');
+        const text = personalizeEmail(body, (u && u.name) || '');
+        if (via === 'gmail') await sendViaGmail(userId, gmailFrom, selfTo, subj, text, null, null, hero);
+        else await tx.sendMail(Object.assign({ from: mailFrom() }, await smtpMessageFor(userId, selfTo, subj, text, null, hero)));
+      }
+    } catch (e) { console.error('self copy failed:', e.message); }
+  }
+
+  const left = await one(`SELECT count(*)::int AS n FROM email_recipients
+                          WHERE user_id = $1 AND NOT coalesce(unsubscribed, FALSE) AND sent_for IS DISTINCT FROM $2`, [userId, runDate]);
+  // One history row per edition, updated as batches complete.
+  const ex = await one('SELECT id FROM email_sends WHERE user_id = $1 AND run_date = $2', [userId, runDate]);
+  if (ex) await pool.query(`UPDATE email_sends SET sent = sent + $1, failed = failed + $2, error = coalesce(error, $3) WHERE id = $4`,
+    [sent, failed, firstErr || null, ex.id]);
+  else await pool.query(`INSERT INTO email_sends (user_id, subject, recipients, sent, failed, trigger, error, run_date)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [userId, subject, total.n, sent, failed, trigger || 'manual', firstErr || null, runDate]);
+
+  const out = { sent, failed, recipients: total.n, remaining: left.n, via, limited: limitHit };
+  if (!sent && (failed || limitHit)) out.error = firstErr || 'Every send failed.';
+  return out;
 }
 
 app.get('/api/realtor/emails', safe(async (req, res) => {
@@ -2319,11 +2362,16 @@ app.put('/api/realtor/emails/settings', safe(async (req, res) => {
   res.json(emailSettingsJson(row));
 }));
 
-// Send to the whole list right now (manual test / one-off blast).
+// Send to the whole list right now. Kicks off (or continues) today's edition:
+// the first batch goes out during this request, the dispatcher drips the rest.
 app.post('/api/realtor/emails/send-now', safe(async (req, res) => {
   if (!requireUser(req, res)) return;
-  const r = await sendWeeklyFor(req.user.id, 'manual');
-  if (r.error) return res.status(400).json(r);
+  const today = await userToday(req.user.id);
+  // Mark today's run so the dispatcher keeps feeding the queue afterwards.
+  await loadEmailSettings(req.user.id);
+  await q('UPDATE email_settings SET last_run_date = $1 WHERE user_id = $2', [today, req.user.id]);
+  const r = await sendWeeklyBatch(req.user.id, today, 'manual');
+  if (r.error && !r.sent) return res.status(400).json(r);
   res.json(r);
 }));
 
@@ -2341,31 +2389,56 @@ async function dispatchWeeklyEmails() {
                         LEFT JOIN google_accounts g ON g.user_id = s.user_id
                         WHERE s.enabled = TRUE`);
   let ran = 0;
+  const started = new Set();
   for (const s of rows) {
     if (!smtp && !s.has_gmail) continue; // no way to send for this user
     const today = (s.tz ? todayInTz(s.tz) : serverToday());
     const weekday = new Date(today + 'T00:00:00').getDay();
     if (weekday !== s.send_day) continue;
-    if (s.last_run_date === today) continue; // already sent today
-    // Claim the day first so overlapping runs can't double-send.
+    if (s.last_run_date === today) continue; // already started today
+    // Claim the day first so overlapping runs can't double-start.
     const claim = await pool.query(
       `UPDATE email_settings SET last_run_date = $1 WHERE user_id = $2 AND (last_run_date IS DISTINCT FROM $1)`,
       [today, s.user_id]);
     if (claim.rowCount === 0) continue;
-    try { await sendWeeklyFor(s.user_id, 'weekly'); ran++; }
+    started.add(s.user_id);
+    try { await sendWeeklyBatch(s.user_id, today, 'weekly'); ran++; }
     catch (e) { console.error('weekly dispatch for user', s.user_id, e.message); }
+  }
+
+  // Continue partially-sent editions (batched sending): any recent run that
+  // still has recipients waiting gets its next batch — including runs started
+  // by "Send to everyone now", and regardless of the enabled toggle.
+  const cont = await q(`SELECT DISTINCT s.user_id, s.last_run_date FROM email_settings s
+                        JOIN email_recipients er ON er.user_id = s.user_id
+                        WHERE s.last_run_date IS NOT NULL
+                          AND s.last_run_date >= to_char(now() - interval '5 days', 'YYYY-MM-DD')
+                          AND NOT coalesce(er.unsubscribed, FALSE)
+                          AND er.sent_for IS DISTINCT FROM s.last_run_date`);
+  for (const c of cont) {
+    if (started.has(c.user_id)) continue; // already got a batch this run
+    try {
+      const r = await sendWeeklyBatch(c.user_id, c.last_run_date, 'weekly');
+      if (r.sent) ran++;
+    } catch (e) { console.error('weekly continue for user', c.user_id, e.message); }
   }
 
   // Freshness pass: the day AFTER an edition goes out (send Monday → rewrite
   // Tuesday), draft next week's edition with AI so the same email never sends
-  // twice. refreshed_for marks which send we already rewrote after, and is
-  // claimed first so overlapping cron runs can't double-generate.
+  // twice. Waits until the whole list has the current edition — rewriting
+  // mid-drip would hand late recipients next week's email. refreshed_for
+  // marks which send we already rewrote after, and is claimed first so
+  // overlapping cron runs can't double-generate.
   let refreshed = 0;
   if (aiConfigured()) {
     const stale = await q(`SELECT s.user_id, s.last_run_date, u.tz FROM email_settings s
                            JOIN users u ON u.id = s.user_id
                            WHERE s.enabled = TRUE AND s.last_run_date IS NOT NULL
-                             AND (s.refreshed_for IS DISTINCT FROM s.last_run_date)`);
+                             AND (s.refreshed_for IS DISTINCT FROM s.last_run_date)
+                             AND NOT EXISTS (SELECT 1 FROM email_recipients er
+                                             WHERE er.user_id = s.user_id
+                                               AND NOT coalesce(er.unsubscribed, FALSE)
+                                               AND er.sent_for IS DISTINCT FROM s.last_run_date)`);
     for (const s of stale) {
       const today = (s.tz ? todayInTz(s.tz) : serverToday());
       if (today <= s.last_run_date) continue; // wait until the day after the send
@@ -2384,17 +2457,28 @@ async function dispatchWeeklyEmails() {
   return { ran, refreshed };
 }
 
-// External cron trigger (protect with CRON_SECRET). Safe to call every few minutes.
+// External cron trigger (protect with CRON_SECRET). Safe to call every few
+// minutes. Responds immediately and does the work in the background — a batch
+// takes ~40s of paced sending, longer than cron services wait for a reply.
+let _dispatchBusy = false;
+async function runDispatch() {
+  if (_dispatchBusy) return;
+  _dispatchBusy = true;
+  try { await dispatchWeeklyEmails(); }
+  catch (e) { console.error('dispatch:', e.message); }
+  finally { _dispatchBusy = false; }
+}
 app.get('/api/cron/dispatch', safe(async (req, res) => {
   const secret = process.env.CRON_SECRET;
   if (!secret || req.query.key !== secret) return res.status(403).json({ error: 'Forbidden.' });
-  const r = await dispatchWeeklyEmails();
-  res.json({ ok: true, ...r });
+  res.json({ ok: true, started: !_dispatchBusy });
+  runDispatch();
 }));
 
-// Internal timer: also runs hourly while the process is awake (belt-and-braces
-// alongside the external cron, which is what matters on hosts that sleep).
-setInterval(() => { dispatchWeeklyEmails().catch(e => console.error('weekly timer:', e.message)); }, 60 * 60 * 1000).unref();
+// Internal timer: also runs every 10 minutes while the process is awake
+// (belt-and-braces alongside the external cron, which is what matters on
+// hosts that sleep; it also drains queued batches between cron ticks).
+setInterval(() => { runDispatch(); }, 10 * 60 * 1000).unref();
 
 // ===================================================================
 // Static files + start
