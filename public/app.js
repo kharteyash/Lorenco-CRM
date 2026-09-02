@@ -1457,7 +1457,9 @@
       <div class="panel p-4 mb-5 flex items-center gap-3 flex-wrap">
         <div class="stat-icon badge green" style="border-radius:11px"><i data-lucide="mail-check"></i></div>
         <div class="min-w-0 flex-1"><div class="text-[13.5px] font-bold">Gmail connected</div>
-          <div class="text-[12px] text-muted truncate">Weekly emails send from ${esc(gmail.email || 'your Google account')}.</div></div>
+          <div class="text-[12px] text-muted truncate">${emailData.bulkVia === 'smtp'
+            ? `Weekly blasts go through your bulk email service (Gmail can't handle bulk); 1:1 emails still send from ${esc(gmail.email || 'your Gmail')}.`
+            : `Weekly emails send from ${esc(gmail.email || 'your Google account')}.`}</div></div>
         <button class="btn-ghost" id="gm-disconnect"><i data-lucide="unlink"></i>Disconnect</button>
       </div>`
       : gmail.configured ? `

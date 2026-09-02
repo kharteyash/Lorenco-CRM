@@ -2134,12 +2134,15 @@ async function sendWeeklyBatch(userId, runDate, trigger) {
   const subject = s.subject || DEFAULT_SUBJECT;
   const body = s.body || DEFAULT_BODY;
 
-  // Pick a channel: connected Gmail first, else SMTP.
+  // Pick a channel. For bulk blasts a real SMTP relay (if configured) beats
+  // consumer Gmail: Gmail flags 100+ message bursts as spam and bounces them
+  // ("You have reached a limit for sending mail") — repeatedly. 1:1 lead
+  // emails still go through the user's own Gmail (sendSingleEmail).
   const gmail = await one('SELECT email FROM google_accounts WHERE user_id = $1', [userId]);
   const tx = mailer();
   let via = null, gmailFrom = '';
-  if (gmail) { via = 'gmail'; gmailFrom = await gmailFromFor(userId, gmail.email); }
-  else if (tx) { via = 'smtp'; }
+  if (tx) { via = 'smtp'; }
+  else if (gmail) { via = 'gmail'; gmailFrom = await gmailFromFor(userId, gmail.email); }
   else return { sent: 0, failed: 0, recipients: total.n, remaining: pending.length, error: 'Connect Gmail (or configure SMTP) to send.' };
 
   const base = appBaseUrl();
@@ -2229,6 +2232,9 @@ app.get('/api/realtor/emails', safe(async (req, res) => {
     ai: aiConfigured(),
     // Sending works if Gmail is connected OR SMTP is set up.
     canSend: gmail.connected || emailConfigured(),
+    // Which channel the weekly blast uses (SMTP relay is bulk-safe; consumer
+    // Gmail gets flagged for 100+ message bursts).
+    bulkVia: emailConfigured() ? 'smtp' : (gmail.connected ? 'gmail' : ''),
     history: history.map(h => ({ subject: h.subject, recipients: h.recipients, sent: h.sent, failed: h.failed, trigger: h.trigger, error: h.error || '', at: h.created_at }))
   });
 }));
